@@ -1,0 +1,24 @@
+services:
+  alipay-kyc:
+    build: .
+    image: ghcr.io/OWNER/REPOSITORY:latest
+    ports:
+      - "8080:8080"
+    environment:
+      HTTP_ADDR: ":8080"
+      PUBLIC_URL: "https://kyc.example.com"
+      SESSION_KEYS: "${SESSION_KEYS}"
+      HASH_PEPPER: "${HASH_PEPPER}"
+      OIDC_ISSUER: "https://authentik.example.com/application/o/alipay-kyc/"
+      OIDC_CLIENT_ID: "${OIDC_CLIENT_ID}"
+      OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET}"
+      AUTHENTIK_BASE_URL: "https://authentik.example.com"
+      AUTHENTIK_TOKEN: "${AUTHENTIK_TOKEN}"
+      AUTHENTIK_USER_ID_CLAIM: "ak_user_id"
+      AUTHENTIK_ATTRIBUTE_KEY: "alipay_kyc"
+      ALIPAY_GATEWAY_URL: "https://openapi.alipay.com/gateway.do"
+      ALIPAY_APP_ID: "${ALIPAY_APP_ID}"
+      ALIPAY_APP_PRIVATE_KEY: "${ALIPAY_APP_PRIVATE_KEY}"
+      ALIPAY_PUBLIC_KEY: "${ALIPAY_PUBLIC_KEY}"
+      ALIPAY_BIZ_CODE: "FACE"
+      ALIPAY_CERT_TYPE: "IDENTITY_CARD"
