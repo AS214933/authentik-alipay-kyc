@@ -309,6 +309,64 @@ func TestKYCConfirmCanBeRetriedAfterQueryError(t *testing.T) {
 	}
 }
 
+func TestKYCConfirmRestoresPendingFromSessionAfterRestart(t *testing.T) {
+	ak := &fakeAuthentik{user: authentik.User{
+		ID:         1,
+		Username:   "alice",
+		Attributes: map[string]interface{}{},
+	}}
+	statsStore := testStats(t)
+	srv := New(Dependencies{
+		Config:    testConfig(),
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: ak,
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     statsStore,
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	cookies := userCookie(t, srv)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"name":"张三","id_number":"11010519491231002X"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var startResp struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &startResp); err != nil {
+		t.Fatal(err)
+	}
+	cookies = mergeCookies(cookies, rec.Result().Cookies())
+
+	srv.pendingMu.Lock()
+	delete(srv.pending, startResp.State)
+	srv.pendingMu.Unlock()
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/confirm", strings.NewReader(`{"state":"`+startResp.State+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirm status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !ak.attr.Verified {
+		t.Fatalf("expected authentik attr to be verified: %+v", ak.attr)
+	}
+}
+
 func TestPendingKYCWorkerCanCompleteVerification(t *testing.T) {
 	ak := &fakeAuthentik{user: authentik.User{
 		ID:         1,

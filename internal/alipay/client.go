@@ -59,9 +59,7 @@ type InitializeResponse struct {
 }
 
 type QueryResponse struct {
-	Passed       string                 `json:"passed"`
-	IdentityInfo map[string]interface{} `json:"identity_info"`
-	MaterialInfo map[string]interface{} `json:"material_info"`
+	Passed string `json:"passed"`
 }
 
 func NewClient(cfg config.AlipayConfig) *Client {

@@ -348,11 +348,12 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.sessions.Save(r, w, map[interface{}]interface{}{
-		session.KYCStateKey:      state,
-		session.CertifyIDKey:     initResp.CertifyID,
-		session.PendingNameKey:   pending.NameMasked,
-		session.PendingIDHashKey: pending.IDHash,
-		session.PendingLast4Key:  pending.IDLast4,
+		session.KYCStateKey:       state,
+		session.CertifyIDKey:      initResp.CertifyID,
+		session.PendingExpiresKey: pending.ExpiresAt.Format(time.RFC3339),
+		session.PendingNameKey:    pending.NameMasked,
+		session.PendingIDHashKey:  pending.IDHash,
+		session.PendingLast4Key:   pending.IDLast4,
 	}); err != nil {
 		s.recordFailure()
 		writeError(w, http.StatusInternalServerError, "failed to save verification session")
@@ -417,12 +418,17 @@ func (s *Server) confirmKYC(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if err := s.clearPendingKYC(r, w); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to clear verification session")
+		if restored, ok := s.pendingKYCFromSession(sess.Values, expectedState, certifyID, userID); ok {
+			pending = restored
+			s.storePendingKYC(pending)
+		} else {
+			if err := s.clearPendingKYC(r, w); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to clear verification session")
+				return
+			}
+			writeError(w, http.StatusGone, "verification has expired")
 			return
 		}
-		writeError(w, http.StatusGone, "verification has expired")
-		return
 	}
 	if pending.UserID != userID || pending.CertifyID != certifyID {
 		writeError(w, http.StatusBadRequest, "invalid verification state")
@@ -589,6 +595,32 @@ func (s *Server) pendingKYC(state string) (pendingKYC, bool) {
 	return pending, ok
 }
 
+func (s *Server) pendingKYCFromSession(values map[interface{}]interface{}, state, certifyID, userID string) (pendingKYC, bool) {
+	pending := pendingKYC{
+		State:      state,
+		CertifyID:  certifyID,
+		UserID:     userID,
+		NameMasked: stringValue(values[session.PendingNameKey]),
+		IDHash:     stringValue(values[session.PendingIDHashKey]),
+		IDLast4:    stringValue(values[session.PendingLast4Key]),
+		ExpiresAt:  time.Now().UTC().Add(s.cfg.KYCTimeout),
+	}
+	if rawExpiresAt := stringValue(values[session.PendingExpiresKey]); rawExpiresAt != "" {
+		expiresAt, err := time.Parse(time.RFC3339, rawExpiresAt)
+		if err != nil {
+			return pendingKYC{}, false
+		}
+		pending.ExpiresAt = expiresAt.UTC()
+		if time.Now().UTC().After(pending.ExpiresAt) {
+			return pendingKYC{}, false
+		}
+	}
+	if pending.State == "" || pending.CertifyID == "" || pending.UserID == "" || pending.NameMasked == "" || pending.IDHash == "" || pending.IDLast4 == "" {
+		return pendingKYC{}, false
+	}
+	return pending, true
+}
+
 func (s *Server) terminalKYC(state string) (terminalKYC, bool) {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
@@ -693,11 +725,12 @@ func (s *Server) checkPendingKYC(ctx context.Context) {
 
 func (s *Server) clearPendingKYC(r *http.Request, w http.ResponseWriter) error {
 	return s.sessions.Save(r, w, map[interface{}]interface{}{
-		session.KYCStateKey:      nil,
-		session.CertifyIDKey:     nil,
-		session.PendingNameKey:   nil,
-		session.PendingIDHashKey: nil,
-		session.PendingLast4Key:  nil,
+		session.KYCStateKey:       nil,
+		session.CertifyIDKey:      nil,
+		session.PendingExpiresKey: nil,
+		session.PendingNameKey:    nil,
+		session.PendingIDHashKey:  nil,
+		session.PendingLast4Key:   nil,
 	})
 }
 

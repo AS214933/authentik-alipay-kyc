@@ -8,17 +8,18 @@ import (
 )
 
 const (
-	UserIDKey        = "user_id"
-	UsernameKey      = "username"
-	EmailKey         = "email"
-	DisplayNameKey   = "display_name"
-	OIDCStateKey     = "oidc_state"
-	OIDCNonceKey     = "oidc_nonce"
-	KYCStateKey      = "kyc_state"
-	CertifyIDKey     = "certify_id"
-	PendingNameKey   = "pending_name"
-	PendingIDHashKey = "pending_id_hash"
-	PendingLast4Key  = "pending_last4"
+	UserIDKey         = "user_id"
+	UsernameKey       = "username"
+	EmailKey          = "email"
+	DisplayNameKey    = "display_name"
+	OIDCStateKey      = "oidc_state"
+	OIDCNonceKey      = "oidc_nonce"
+	KYCStateKey       = "kyc_state"
+	CertifyIDKey      = "certify_id"
+	PendingExpiresKey = "pending_expires"
+	PendingNameKey    = "pending_name"
+	PendingIDHashKey  = "pending_id_hash"
+	PendingLast4Key   = "pending_last4"
 )
 
 type Store struct {
