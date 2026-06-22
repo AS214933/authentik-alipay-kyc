@@ -3,3 +3,5 @@ node_modules/
 *.log
 tmp/
 data/
+internal/server/dist/*
+!internal/server/dist/keep.txt
