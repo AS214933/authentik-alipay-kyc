@@ -66,6 +66,21 @@ func (f fakeAlipay) Query(context.Context, string) (alipay.QueryResponse, error)
 	return alipay.QueryResponse{Passed: f.passed}, nil
 }
 
+type sequenceAlipay struct {
+	fakeAlipay
+	passes []string
+	calls  int
+}
+
+func (f *sequenceAlipay) Query(context.Context, string) (alipay.QueryResponse, error) {
+	passed := f.fakeAlipay.passed
+	if f.calls < len(f.passes) {
+		passed = f.passes[f.calls]
+	}
+	f.calls++
+	return alipay.QueryResponse{Passed: passed}, nil
+}
+
 func TestKYCFlowWritesAuthentikAttribute(t *testing.T) {
 	ak := &fakeAuthentik{user: authentik.User{
 		ID:         1,
@@ -134,6 +149,112 @@ func TestKYCFlowWritesAuthentikAttribute(t *testing.T) {
 	}
 	if counters.Total != 1 || counters.Success != 1 || counters.Failure != 0 {
 		t.Fatalf("unexpected counters: %+v", counters)
+	}
+}
+
+func TestKYCConfirmCanBeRetriedAfterNotPassed(t *testing.T) {
+	ak := &fakeAuthentik{user: authentik.User{
+		ID:         1,
+		Username:   "alice",
+		Attributes: map[string]interface{}{},
+	}}
+	alipayClient := &sequenceAlipay{
+		fakeAlipay: fakeAlipay{certifyID: "CERT123"},
+		passes:     []string{"F", "T"},
+	}
+	statsStore := testStats(t)
+	srv := New(Dependencies{
+		Config:    testConfig(),
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: ak,
+		Alipay:    alipayClient,
+		Stats:     statsStore,
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	cookies := userCookie(t, srv)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"name":"张三","id_number":"11010519491231002X"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var startResp struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &startResp); err != nil {
+		t.Fatal(err)
+	}
+	cookies = mergeCookies(cookies, rec.Result().Cookies())
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/confirm", strings.NewReader(`{"state":"`+startResp.State+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("first confirm status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/confirm", strings.NewReader(`{"state":"`+startResp.State+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second confirm status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !ak.attr.Verified {
+		t.Fatalf("expected authentik attr to be verified: %+v", ak.attr)
+	}
+	counters, err := statsStore.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counters.Total != 1 || counters.Success != 1 || counters.Failure != 0 {
+		t.Fatalf("unexpected counters after retry: %+v", counters)
+	}
+}
+
+func TestAlipayReturnShowsDesktopInstruction(t *testing.T) {
+	srv := New(Dependencies{
+		Config:    testConfig(),
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html>spa</html>"), ModTime: time.Now()},
+		}),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/verify/callback?state=state-123", nil)
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("callback status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("callback content type = %q", rec.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(rec.Body.String(), "回到刚才显示二维码的电脑页面") {
+		t.Fatalf("callback body did not contain desktop instruction: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "spa") {
+		t.Fatalf("callback unexpectedly served SPA body: %s", rec.Body.String())
 	}
 }
 

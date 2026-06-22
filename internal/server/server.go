@@ -94,6 +94,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /auth/login", s.login)
 	mux.HandleFunc("GET /auth/callback", s.oidcCallback)
+	mux.HandleFunc("GET /verify/callback", s.alipayReturn)
 	mux.HandleFunc("POST /auth/logout", s.logout)
 	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("GET /api/stats", s.statsSnapshot)
@@ -345,7 +346,6 @@ func (s *Server) confirmKYC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.ToUpper(queryResp.Passed) != "T" {
-		s.settleFailure(r, w)
 		writeError(w, http.StatusConflict, "alipay verification has not passed")
 		return
 	}
@@ -385,6 +385,56 @@ func (s *Server) alipayNotify(w http.ResponseWriter, r *http.Request) {
 	// The browser return flow performs the authoritative query and Authentik update.
 	// This endpoint exists so operators can configure a notify URL without causing retries.
 	writePlain(w, http.StatusOK, "success")
+}
+
+func (s *Server) alipayReturn(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>支付宝认证已返回</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      box-sizing: border-box;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f4f6f8;
+      color: #17202a;
+    }
+    main {
+      width: min(100%, 420px);
+      padding: 24px;
+      border: 1px solid #d7dde4;
+      border-radius: 8px;
+      background: #ffffff;
+      box-shadow: 0 18px 55px rgba(23, 32, 42, 0.12);
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 22px;
+      line-height: 1.3;
+    }
+    p {
+      margin: 0;
+      color: #344055;
+      line-height: 1.7;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>已返回认证结果</h1>
+    <p>请回到刚才显示二维码的电脑页面，点击“我已完成，检查结果”。这个手机页面可以直接关闭。</p>
+  </main>
+</body>
+</html>`)
 }
 
 func (s *Server) spa(w http.ResponseWriter, r *http.Request) {
