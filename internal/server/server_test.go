@@ -186,6 +186,9 @@ func TestKYCFlowWritesAuthentikAttribute(t *testing.T) {
 	if piiStore.entries[0].CertifyID != "CERT123" || piiStore.entries[0].State != startResp.State {
 		t.Fatalf("unexpected pii entry identity: %+v", piiStore.entries[0])
 	}
+	if piiStore.entries[0].IDHash != ak.attr.IDHash {
+		t.Fatalf("pii id hash = %q, authentik id hash = %q", piiStore.entries[0].IDHash, ak.attr.IDHash)
+	}
 	counters, err := statsStore.Snapshot()
 	if err != nil {
 		t.Fatal(err)

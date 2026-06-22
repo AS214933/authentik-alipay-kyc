@@ -20,7 +20,7 @@ type Config struct {
 	TrustedProxies   []string
 	StatsFile        string
 	StatsAPIToken    string
-	PIIFile          string
+	PIIDir           string
 	PIIPublicKeyType string
 	PIIPublicKeyPEM  string
 	KYCTimeout       time.Duration
@@ -95,7 +95,7 @@ func Load() (Config, error) {
 		TrustedProxies:   splitCSV(getenv("TRUSTED_PROXIES", "")),
 		StatsFile:        getenv("STATS_FILE", "/data/stats.json"),
 		StatsAPIToken:    getenv("STATS_API_TOKEN", ""),
-		PIIFile:          getenv("KYC_PII_FILE", "/data/kyc_pii.jsonl"),
+		PIIDir:           getenv("KYC_PII_DIR", "/data/kyc_pii"),
 		PIIPublicKeyType: strings.ToLower(getenv("PII_ENCRYPTION_PUBLIC_KEY_TYPE", "rsa")),
 		PIIPublicKeyPEM:  normalizePEM(getenv("PII_ENCRYPTION_PUBLIC_KEY", "")),
 		KYCTimeout:       secondsEnv("KYC_TIMEOUT_SECONDS", 1800),
@@ -143,8 +143,8 @@ func Load() (Config, error) {
 	if cfg.StatsAPIToken == "" {
 		return Config{}, errors.New("STATS_API_TOKEN is required")
 	}
-	if cfg.PIIFile == "" || cfg.PIIPublicKeyPEM == "" {
-		return Config{}, errors.New("KYC_PII_FILE and PII_ENCRYPTION_PUBLIC_KEY are required")
+	if cfg.PIIDir == "" || cfg.PIIPublicKeyPEM == "" {
+		return Config{}, errors.New("KYC_PII_DIR and PII_ENCRYPTION_PUBLIC_KEY are required")
 	}
 	if cfg.PIIPublicKeyType != "rsa" && cfg.PIIPublicKeyType != "sm2" {
 		return Config{}, errors.New("PII_ENCRYPTION_PUBLIC_KEY_TYPE must be rsa or sm2")

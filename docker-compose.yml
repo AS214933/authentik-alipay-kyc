@@ -10,7 +10,7 @@ services:
       HASH_PEPPER: "${HASH_PEPPER}"
       STATS_FILE: "/data/stats.json"
       STATS_API_TOKEN: "${STATS_API_TOKEN}"
-      KYC_PII_FILE: "/data/kyc_pii.jsonl"
+      KYC_PII_DIR: "/data/kyc_pii"
       PII_ENCRYPTION_PUBLIC_KEY_TYPE: "${PII_ENCRYPTION_PUBLIC_KEY_TYPE:-rsa}"
       PII_ENCRYPTION_PUBLIC_KEY: "${PII_ENCRYPTION_PUBLIC_KEY}"
       OIDC_ISSUER: "https://authentik.example.com/application/o/alipay-kyc/"

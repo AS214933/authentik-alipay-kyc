@@ -31,7 +31,7 @@ const (
 
 type Store struct {
 	mu        sync.Mutex
-	path      string
+	dir       string
 	encrypter keyEncrypter
 	random    io.Reader
 }
@@ -42,6 +42,7 @@ type Entry struct {
 	State        string `json:"state"`
 	CertifyID    string `json:"certify_id"`
 	OuterOrderNo string `json:"outer_order_no"`
+	IDHash       string `json:"id_hash"`
 	Name         string `json:"name"`
 	IDNumber     string `json:"id_number"`
 }
@@ -54,6 +55,7 @@ type record struct {
 	State        string            `json:"state"`
 	CertifyID    string            `json:"certify_id"`
 	OuterOrderNo string            `json:"outer_order_no"`
+	IDHash       string            `json:"id_hash"`
 	Envelope     encryptedEnvelope `json:"envelope"`
 }
 
@@ -99,42 +101,37 @@ func (e sm2Encrypter) EncryptKey(random io.Reader, key []byte) ([]byte, error) {
 	return sm2.EncryptASN1(random, e.key, key)
 }
 
-func NewStore(path, publicKeyType, publicKeyPEM string) (*Store, error) {
-	return newStore(path, publicKeyType, publicKeyPEM, rand.Reader)
+func NewStore(dir, publicKeyType, publicKeyPEM string) (*Store, error) {
+	return newStore(dir, publicKeyType, publicKeyPEM, rand.Reader)
 }
 
-func newStore(path, publicKeyType, publicKeyPEM string, random io.Reader) (*Store, error) {
-	if path == "" {
-		return nil, errors.New("pii file path is required")
+func newStore(dir, publicKeyType, publicKeyPEM string, random io.Reader) (*Store, error) {
+	if dir == "" {
+		return nil, errors.New("pii directory is required")
 	}
 	encrypter, err := parseEncrypter(publicKeyType, publicKeyPEM)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create pii directory: %w", err)
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open pii file: %w", err)
-	}
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("chmod pii file: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return nil, fmt.Errorf("close pii file: %w", err)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("chmod pii directory: %w", err)
 	}
 	return &Store{
-		path:      path,
+		dir:       dir,
 		encrypter: encrypter,
 		random:    random,
 	}, nil
 }
 
 func (s *Store) Append(entry Entry) error {
-	if strings.TrimSpace(entry.UserID) == "" || strings.TrimSpace(entry.State) == "" || strings.TrimSpace(entry.CertifyID) == "" || strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.IDNumber) == "" {
+	if strings.TrimSpace(entry.UserID) == "" || strings.TrimSpace(entry.State) == "" || strings.TrimSpace(entry.CertifyID) == "" || strings.TrimSpace(entry.IDHash) == "" || strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.IDNumber) == "" {
 		return errors.New("pii entry is missing required fields")
+	}
+	if !validIDHash(entry.IDHash) {
+		return errors.New("pii id_hash must be a 64 character lowercase hex string")
 	}
 	plain, err := json.Marshal(plaintext{
 		Name:     entry.Name,
@@ -155,28 +152,84 @@ func (s *Store) Append(entry Entry) error {
 		State:        entry.State,
 		CertifyID:    entry.CertifyID,
 		OuterOrderNo: entry.OuterOrderNo,
+		IDHash:       entry.IDHash,
 		Envelope:     envelope,
 	}
-	data, err := json.Marshal(rec)
-	if err != nil {
-		return fmt.Errorf("encode pii record: %w", err)
-	}
-	data = append(data, '\n')
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	file, err := os.OpenFile(s.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	path := s.pathForHash(entry.IDHash)
+	records, err := readRecords(path)
 	if err != nil {
-		return fmt.Errorf("open pii file: %w", err)
+		return err
 	}
-	defer file.Close()
-	if err := file.Chmod(0o600); err != nil {
-		return fmt.Errorf("chmod pii file: %w", err)
+	records = append(records, rec)
+	data, err := json.MarshalIndent(records, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode pii records: %w", err)
 	}
-	if _, err := file.Write(data); err != nil {
-		return fmt.Errorf("write pii file: %w", err)
+	data = append(data, '\n')
+	if err := writeFileAtomic(path, data); err != nil {
+		return err
 	}
 	return nil
+}
+
+func (s *Store) pathForHash(idHash string) string {
+	return filepath.Join(s.dir, idHash)
+}
+
+func readRecords(path string) ([]record, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read pii file: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var records []record
+	if err := json.Unmarshal(data, &records); err != nil {
+		return nil, fmt.Errorf("decode pii file: %w", err)
+	}
+	return records, nil
+}
+
+func writeFileAtomic(path string, data []byte) error {
+	tmp := path + ".tmp"
+	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("open pii temp file: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write pii temp file: %w", err)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("chmod pii temp file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close pii temp file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("replace pii file: %w", err)
+	}
+	return nil
+}
+
+func validIDHash(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) encrypt(plain []byte) (encryptedEnvelope, error) {

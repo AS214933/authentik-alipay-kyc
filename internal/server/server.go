@@ -336,6 +336,7 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 	}
 	returnURL := addQuery(s.cfg.Alipay.ReturnURL, "state", state)
 	outerOrderNo := "ak" + time.Now().UTC().Format("20060102150405") + orderToken[:16]
+	idHash := identitycrypto.IDHash(idNumber, s.cfg.HashPepper)
 
 	initResp, err := s.alipay.Initialize(r.Context(), outerOrderNo, req.Name, idNumber, returnURL)
 	if err != nil {
@@ -357,6 +358,7 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 			State:        state,
 			CertifyID:    initResp.CertifyID,
 			OuterOrderNo: outerOrderNo,
+			IDHash:       idHash,
 			Name:         req.Name,
 			IDNumber:     idNumber,
 		}); err != nil {
@@ -371,7 +373,7 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		CertifyID:  initResp.CertifyID,
 		UserID:     userID,
 		NameMasked: identitycrypto.MaskChineseName(req.Name),
-		IDHash:     identitycrypto.IDHash(idNumber, s.cfg.HashPepper),
+		IDHash:     idHash,
 		IDLast4:    identitycrypto.Last4(idNumber),
 		ExpiresAt:  time.Now().UTC().Add(s.cfg.KYCTimeout),
 	}

@@ -45,7 +45,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	piiStore, err := piistore.NewStore(cfg.PIIFile, cfg.PIIPublicKeyType, cfg.PIIPublicKeyPEM)
+	piiStore, err := piistore.NewStore(cfg.PIIDir, cfg.PIIPublicKeyType, cfg.PIIPublicKeyPEM)
 	if err != nil {
 		logger.Error("configure pii store", "error", err)
 		os.Exit(1)

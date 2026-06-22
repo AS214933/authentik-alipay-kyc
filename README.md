@@ -14,7 +14,7 @@ authentik receives only an HMAC-SHA256 ID hash, ID last four characters, masked 
 
 Verification counters are stored in a local JSON file and are not shown in the frontend. They can be read through an authenticated API.
 
-The full submitted name and ID number are stored locally in an encrypted JSONL file. Each record uses AES-256-GCM for the PII payload and encrypts the data key with a configured RSA or SM2 public key. The private key is not required by the service and should be kept offline.
+The full submitted name and ID number are stored locally in encrypted per-person JSON files named exactly with the same `id_hash` value written to authentik. Each record uses AES-256-GCM for the PII payload and encrypts the data key with a configured RSA or SM2 public key. The private key is not required by the service and should be kept offline.
 
 Alipay verification stays pending for 30 minutes by default. Users can retry result checks from the browser, and the server also polls pending Alipay certifications on a one-minute interval. Mobile browsers try to open the Alipay app through the external H5 launch URL while keeping the QR code as a fallback.
 
@@ -76,7 +76,7 @@ Configure the Alipay application for identity verification and set the return UR
 | `HASH_PEPPER` | yes | empty | Secret HMAC key for ID hashes. |
 | `STATS_FILE` | no | `/data/stats.json` | Local JSON file storing total, success, and failure counters. |
 | `STATS_API_TOKEN` | yes | empty | Bearer token required for `GET /api/stats`. |
-| `KYC_PII_FILE` | no | `/data/kyc_pii.jsonl` | Append-only local file for encrypted submitted name and ID number records. |
+| `KYC_PII_DIR` | no | `/data/kyc_pii` | Local directory for encrypted submitted name and ID number records. Each file is named `<id_hash>`. |
 | `PII_ENCRYPTION_PUBLIC_KEY_TYPE` | no | `rsa` | Public key type for local PII encryption. Supported values: `rsa`, `sm2`. |
 | `PII_ENCRYPTION_PUBLIC_KEY` | yes | empty | PEM public key used to encrypt local PII records. RSA uses RSA-OAEP-SHA256; SM2 uses ASN.1 SM2 ciphertext. |
 | `KYC_TIMEOUT_SECONDS` | no | `1800` | Pending Alipay verification timeout. Defaults to 30 minutes. |
