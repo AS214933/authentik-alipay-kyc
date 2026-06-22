@@ -23,6 +23,7 @@ type Config struct {
 	PIIDir           string
 	PIIPublicKeyType string
 	PIIPublicKeyPEM  string
+	QRNoticeHTML     string
 	KYCTimeout       time.Duration
 	KYCPollInterval  time.Duration
 	OIDC             OIDCConfig
@@ -108,6 +109,7 @@ func Load() (Config, error) {
 		PIIDir:           getenv("KYC_PII_DIR", "/data/kyc_pii"),
 		PIIPublicKeyType: strings.ToLower(getenv("PII_ENCRYPTION_PUBLIC_KEY_TYPE", "rsa")),
 		PIIPublicKeyPEM:  piiPublicKeyPEM,
+		QRNoticeHTML:     getenv("KYC_QR_NOTICE_HTML", ""),
 		KYCTimeout:       secondsEnv("KYC_TIMEOUT_SECONDS", 1800),
 		KYCPollInterval:  secondsEnv("KYC_POLL_INTERVAL_SECONDS", 60),
 		OIDC: OIDCConfig{

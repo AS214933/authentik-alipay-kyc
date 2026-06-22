@@ -11,6 +11,7 @@ services:
       STATS_FILE: "/data/stats.json"
       STATS_API_TOKEN: "${STATS_API_TOKEN}"
       KYC_PII_DIR: "/data/kyc_pii"
+      KYC_QR_NOTICE_HTML: "${KYC_QR_NOTICE_HTML:-}"
       PII_ENCRYPTION_PUBLIC_KEY_TYPE: "${PII_ENCRYPTION_PUBLIC_KEY_TYPE:-rsa}"
       PII_ENCRYPTION_PUBLIC_KEY_FILE: "/pii-public.pem"
       ADMIN_ENABLED: "${ADMIN_ENABLED:-false}"

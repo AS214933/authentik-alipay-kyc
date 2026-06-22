@@ -198,6 +198,78 @@ func TestKYCFlowWritesAuthentikAttribute(t *testing.T) {
 	}
 }
 
+func TestMeReturnsQRNoticeHTML(t *testing.T) {
+	cfg := testConfig()
+	cfg.QRNoticeHTML = `<p>扫码后请完成支付宝人脸认证。</p>`
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	for _, cookie := range userCookie(t, srv) {
+		req.AddCookie(cookie)
+	}
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("me status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		QRNoticeHTML string `json:"qr_notice_html"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.QRNoticeHTML != cfg.QRNoticeHTML {
+		t.Fatalf("qr_notice_html = %q, want %q", body.QRNoticeHTML, cfg.QRNoticeHTML)
+	}
+}
+
+func TestStartKYCReturnsQRNoticeHTML(t *testing.T) {
+	cfg := testConfig()
+	cfg.QRNoticeHTML = `<strong>请使用本人支付宝扫码。</strong>`
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"name":"张三","id_number":"11010519491231002X"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range userCookie(t, srv) {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		QRNoticeHTML string `json:"qr_notice_html"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.QRNoticeHTML != cfg.QRNoticeHTML {
+		t.Fatalf("qr_notice_html = %q, want %q", body.QRNoticeHTML, cfg.QRNoticeHTML)
+	}
+}
+
 func TestKYCConfirmCanBeRetriedAfterNotPassed(t *testing.T) {
 	ak := &fakeAuthentik{user: authentik.User{
 		ID:         1,

@@ -18,6 +18,8 @@ The full submitted name and ID number are stored locally in encrypted per-person
 
 Alipay verification stays pending for 30 minutes by default. Users can retry result checks from the browser, and the server also polls pending Alipay certifications on a one-minute interval. Mobile browsers try to open the Alipay app through the external H5 launch URL while keeping the QR code as a fallback.
 
+Set `KYC_QR_NOTICE_HTML` to show custom trusted HTML between the Alipay QR code and the result-check button. It is empty by default.
+
 ## authentik Setup
 
 Create an OAuth2/OpenID Provider and an Application named `实名认证`.
@@ -77,6 +79,7 @@ Configure the Alipay application for identity verification and set the return UR
 | `STATS_FILE` | no | `/data/stats.json` | Local JSON file storing total, success, and failure counters. |
 | `STATS_API_TOKEN` | yes | empty | Bearer token required for `GET /api/stats`. |
 | `KYC_PII_DIR` | no | `/data/kyc_pii` | Local directory for encrypted submitted name and ID number records. Each file is named `<id_hash>`. |
+| `KYC_QR_NOTICE_HTML` | no | empty | Trusted HTML rendered between the Alipay QR code and the `我已完成，检查结果` button. |
 | `PII_ENCRYPTION_PUBLIC_KEY_TYPE` | no | `rsa` | Public key type for local PII encryption. Supported values: `rsa`, `sm2`. |
 | `PII_ENCRYPTION_PUBLIC_KEY` | one of key or file | empty | PEM public key used to encrypt local PII records. RSA uses RSA-OAEP-SHA256; SM2 uses ASN.1 SM2 ciphertext. |
 | `PII_ENCRYPTION_PUBLIC_KEY_FILE` | one of key or file | empty | Path to a PEM public key file. Use this instead of `PII_ENCRYPTION_PUBLIC_KEY` when mounting the key into Docker. |

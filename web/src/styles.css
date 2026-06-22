@@ -221,6 +221,32 @@ h2 {
   image-rendering: pixelated;
 }
 
+.qr-notice {
+  width: min(100%, 420px);
+  padding: 12px 14px;
+  border: 1px solid #d7dde4;
+  border-radius: 8px;
+  background: #f8fafb;
+  color: #344055;
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.qr-notice > :last-child {
+  margin-bottom: 0;
+}
+
+.qr-notice a {
+  color: #0f6b56;
+  font-weight: 700;
+}
+
+.qr-notice ul,
+.qr-notice ol {
+  padding-left: 1.4em;
+}
+
 .qr-actions {
   width: min(100%, 320px);
   display: grid;

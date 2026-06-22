@@ -77,6 +77,31 @@ func TestLoadAcceptsAdminPasswordWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestLoadReadsQRNoticeHTML(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("KYC_QR_NOTICE_HTML", `<p>认证前请确认信息。</p>`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.QRNoticeHTML != `<p>认证前请确认信息。</p>` {
+		t.Fatalf("QRNoticeHTML = %q", cfg.QRNoticeHTML)
+	}
+}
+
+func TestLoadDefaultsQRNoticeHTMLToEmpty(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.QRNoticeHTML != "" {
+		t.Fatalf("QRNoticeHTML = %q, want empty", cfg.QRNoticeHTML)
+	}
+}
+
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("PUBLIC_URL", "https://kyc.example.com")

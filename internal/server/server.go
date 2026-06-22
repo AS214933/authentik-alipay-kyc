@@ -272,9 +272,10 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		"display_name": stringValue(sess.Values[session.DisplayNameKey]),
 	}
 	response := map[string]interface{}{
-		"authenticated": true,
-		"user":          user,
-		"verified":      false,
+		"authenticated":  true,
+		"user":           user,
+		"verified":       false,
+		"qr_notice_html": s.cfg.QRNoticeHTML,
 	}
 
 	akUser, err := s.authentik.GetUser(r.Context(), userID)
@@ -545,6 +546,7 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		"certify_id":     initResp.CertifyID,
 		"state":          state,
 		"expires_at":     pending.ExpiresAt.Format(time.RFC3339),
+		"qr_notice_html": s.cfg.QRNoticeHTML,
 	})
 }
 
