@@ -68,7 +68,7 @@ Configure the Alipay application for identity verification and set the return UR
 | `SESSION_KEYS` | production | generated | Comma-separated base64 keys, at least 32 bytes each. Generate with `openssl rand -base64 64`. |
 | `SESSION_SECURE` | no | derived | Secure cookie flag. Defaults to true for HTTPS `PUBLIC_URL`. |
 | `HASH_PEPPER` | yes | empty | Secret HMAC key for ID hashes. |
-| `OIDC_ISSUER` | yes | empty | authentik provider issuer URL. |
+| `OIDC_ISSUER` | yes | empty | authentik provider issuer URL. Use the exact issuer from authentik discovery, usually ending with `/`, for example `https://auth.example.com/application/o/alipay-kyc/`. |
 | `OIDC_CLIENT_ID` | yes | empty | OIDC client ID. |
 | `OIDC_CLIENT_SECRET` | yes | empty | OIDC client secret. |
 | `OIDC_REDIRECT_URL` | no | `${PUBLIC_URL}/auth/callback` | OIDC callback URL. |

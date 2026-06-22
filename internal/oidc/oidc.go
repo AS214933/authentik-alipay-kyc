@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/example/authentik-alipay-kyc/internal/config"
@@ -31,7 +32,7 @@ type Claims struct {
 }
 
 func New(ctx context.Context, cfg config.OIDCConfig) (*Client, error) {
-	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
+	provider, err := discoverProvider(ctx, cfg.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("discover issuer: %w", err)
 	}
@@ -50,6 +51,22 @@ func New(ctx context.Context, cfg config.OIDCConfig) (*Client, error) {
 		oauth2:      oauthCfg,
 		userIDClaim: cfg.UserIDClaim,
 	}, nil
+}
+
+func discoverProvider(ctx context.Context, issuer string) (*oidc.Provider, error) {
+	provider, err := oidc.NewProvider(ctx, issuer)
+	if err == nil {
+		return provider, nil
+	}
+	if strings.HasSuffix(issuer, "/") {
+		return nil, err
+	}
+	retryIssuer := issuer + "/"
+	provider, retryErr := oidc.NewProvider(ctx, retryIssuer)
+	if retryErr != nil {
+		return nil, err
+	}
+	return provider, nil
 }
 
 func (c *Client) AuthCodeURL(state, nonce string) string {

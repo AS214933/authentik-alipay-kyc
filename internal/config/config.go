@@ -87,7 +87,7 @@ func Load() (Config, error) {
 		HashPepper:     getenv("HASH_PEPPER", ""),
 		TrustedProxies: splitCSV(getenv("TRUSTED_PROXIES", "")),
 		OIDC: OIDCConfig{
-			Issuer:       strings.TrimRight(getenv("OIDC_ISSUER", ""), "/"),
+			Issuer:       getenv("OIDC_ISSUER", ""),
 			ClientID:     getenv("OIDC_CLIENT_ID", ""),
 			ClientSecret: getenv("OIDC_CLIENT_SECRET", ""),
 			RedirectURL:  redirectURL,
