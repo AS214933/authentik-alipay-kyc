@@ -188,6 +188,10 @@ h2 {
   gap: 18px;
 }
 
+.mobile-launch {
+  width: min(100%, 320px);
+}
+
 .qr-frame {
   width: min(100%, 280px);
   aspect-ratio: 1;

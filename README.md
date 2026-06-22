@@ -16,7 +16,7 @@ Verification counters are stored in a local JSON file and are not shown in the f
 
 The full submitted name and ID number are stored locally in an encrypted JSONL file. Each record uses AES-256-GCM for the PII payload and encrypts the data key with a configured RSA or SM2 public key. The private key is not required by the service and should be kept offline.
 
-Alipay verification stays pending for 30 minutes by default. Users can retry result checks from the browser, and the server also polls pending Alipay certifications on a one-minute interval.
+Alipay verification stays pending for 30 minutes by default. Users can retry result checks from the browser, and the server also polls pending Alipay certifications on a one-minute interval. Mobile browsers try to open the Alipay app through the external H5 launch URL while keeping the QR code as a fallback.
 
 ## authentik Setup
 

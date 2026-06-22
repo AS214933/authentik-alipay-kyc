@@ -27,6 +27,15 @@ func TestCanonicalizeSkipsSignOnly(t *testing.T) {
 	}
 }
 
+func TestCertifyAppURL(t *testing.T) {
+	certifyURL := "https://openapi.alipay.com/gateway.do?method=alipay.user.certify.open.certify&biz_content=%7B%22certify_id%22%3A%22abc%22%7D"
+	got := CertifyAppURL(certifyURL)
+	want := "alipays://platformapi/startapp?appId=20000067&url=https%3A%2F%2Fopenapi.alipay.com%2Fgateway.do%3Fmethod%3Dalipay.user.certify.open.certify%26biz_content%3D%257B%2522certify_id%2522%253A%2522abc%2522%257D"
+	if got != want {
+		t.Fatalf("CertifyAppURL() = %q, want %q", got, want)
+	}
+}
+
 func TestQueryResponseIgnoresStringMaterialInfo(t *testing.T) {
 	body := []byte(`{
 		"code": "10000",

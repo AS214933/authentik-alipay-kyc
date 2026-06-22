@@ -62,7 +62,7 @@ func (f fakeAlipay) Initialize(context.Context, string, string, string, string) 
 }
 
 func (f fakeAlipay) CertifyURL(certifyID string) (string, error) {
-	return "https://alipay.example/certify?certify_id=" + certifyID, nil
+	return "https://alipay.example/gateway.do?method=alipay.user.certify.open.certify&certify_id=" + certifyID, nil
 }
 
 func (f fakeAlipay) Query(context.Context, string) (alipay.QueryResponse, error) {
@@ -142,9 +142,10 @@ func TestKYCFlowWritesAuthentikAttribute(t *testing.T) {
 		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	var startResp struct {
-		State       string `json:"state"`
-		CertifyURL  string `json:"certify_url"`
-		RedirectURL string `json:"redirect_url"`
+		State        string `json:"state"`
+		CertifyURL   string `json:"certify_url"`
+		RedirectURL  string `json:"redirect_url"`
+		AlipayAppURL string `json:"alipay_app_url"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &startResp); err != nil {
 		t.Fatal(err)
@@ -154,6 +155,12 @@ func TestKYCFlowWritesAuthentikAttribute(t *testing.T) {
 	}
 	if startResp.CertifyURL == "" || startResp.CertifyURL != startResp.RedirectURL {
 		t.Fatalf("unexpected certify url response: %+v", startResp)
+	}
+	if !strings.HasPrefix(startResp.AlipayAppURL, "alipays://platformapi/startapp?appId=20000067&url=") {
+		t.Fatalf("unexpected alipay app url: %+v", startResp)
+	}
+	if !strings.Contains(startResp.AlipayAppURL, "alipay.user.certify.open.certify") {
+		t.Fatalf("alipay app url did not contain encoded certify method: %+v", startResp)
 	}
 	cookies = mergeCookies(cookies, rec.Result().Cookies())
 

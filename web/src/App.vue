@@ -59,6 +59,12 @@
           </div>
 
           <div v-else-if="state.qrCode" class="qr-panel">
+            <div v-if="state.appLaunchUrl && state.mobile" class="mobile-launch">
+              <button class="primary" type="button" @click="openAlipay">
+                <ExternalLink :size="18" />
+                打开支付宝
+              </button>
+            </div>
             <div class="qr-frame">
               <img :src="state.qrCode" alt="支付宝实名认证二维码" />
             </div>
@@ -113,7 +119,7 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { AlertTriangle, CircleCheck, Clock3, LoaderCircle, LogIn, LogOut, ShieldCheck } from '@lucide/vue'
+import { AlertTriangle, CircleCheck, Clock3, ExternalLink, LoaderCircle, LogIn, LogOut, ShieldCheck } from '@lucide/vue'
 import QRCode from 'qrcode'
 
 const state = reactive({
@@ -125,6 +131,8 @@ const state = reactive({
   user: {},
   kyc: null,
   qrCode: '',
+  appLaunchUrl: '',
+  mobile: isMobileBrowser(),
   pendingState: '',
   error: ''
 })
@@ -207,11 +215,14 @@ async function startKyc() {
       body: JSON.stringify({ name: form.name, id_number: form.id_number })
     })
     state.pendingState = data.state || ''
-    state.qrCode = await QRCode.toDataURL(data.certify_url || data.redirect_url, {
+    state.appLaunchUrl = data.alipay_app_url || ''
+    const qrUrl = data.certify_url || data.redirect_url
+    state.qrCode = await QRCode.toDataURL(qrUrl, {
       errorCorrectionLevel: 'M',
       margin: 1,
       scale: 8
     })
+    openAlipayOnMobile()
   } catch (err) {
     state.error = err.message
   } finally {
@@ -230,6 +241,7 @@ async function confirmKyc(stateValue) {
     state.verified = true
     state.kyc = data.kyc
     state.qrCode = ''
+    state.appLaunchUrl = ''
     state.pendingState = ''
     window.history.replaceState({}, '', '/')
   } catch (err) {
@@ -248,8 +260,25 @@ async function confirmKyc(stateValue) {
 
 function resetKyc() {
   state.qrCode = ''
+  state.appLaunchUrl = ''
   state.pendingState = ''
   state.error = ''
+}
+
+function openAlipay() {
+  if (state.appLaunchUrl) {
+    window.location.href = state.appLaunchUrl
+  }
+}
+
+function openAlipayOnMobile() {
+  if (state.appLaunchUrl && state.mobile) {
+    window.setTimeout(openAlipay, 120)
+  }
+}
+
+function isMobileBrowser() {
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(window.navigator.userAgent)
 }
 
 function formatDate(value) {

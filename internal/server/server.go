@@ -391,11 +391,12 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 	s.storePendingKYC(pending)
 
 	writeJSON(w, http.StatusOK, map[string]string{
-		"redirect_url": certifyURL,
-		"certify_url":  certifyURL,
-		"certify_id":   initResp.CertifyID,
-		"state":        state,
-		"expires_at":   pending.ExpiresAt.Format(time.RFC3339),
+		"redirect_url":   certifyURL,
+		"certify_url":    certifyURL,
+		"alipay_app_url": alipay.CertifyAppURL(certifyURL),
+		"certify_id":     initResp.CertifyID,
+		"state":          state,
+		"expires_at":     pending.ExpiresAt.Format(time.RFC3339),
 	})
 }
 

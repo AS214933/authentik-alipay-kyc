@@ -26,6 +26,7 @@ const (
 	MethodInitialize = "alipay.user.certify.open.initialize"
 	MethodQuery      = "alipay.user.certify.open.query"
 	MethodCertify    = "alipay.user.certify.open.certify"
+	AppLaunchURL     = "alipays://platformapi/startapp?appId=20000067&url="
 )
 
 type Client struct {
@@ -117,6 +118,10 @@ func (c *Client) CertifyURL(certifyID string) (string, error) {
 	}
 	params.Set("sign", sign)
 	return c.gatewayURL + "?" + params.Encode(), nil
+}
+
+func CertifyAppURL(certifyURL string) string {
+	return AppLaunchURL + url.QueryEscape(certifyURL)
 }
 
 func (c *Client) Query(ctx context.Context, certifyID string) (QueryResponse, error) {
