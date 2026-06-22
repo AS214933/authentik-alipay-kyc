@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,6 +20,7 @@ import (
 	identitycrypto "github.com/example/authentik-alipay-kyc/internal/crypto"
 	"github.com/example/authentik-alipay-kyc/internal/oidc"
 	"github.com/example/authentik-alipay-kyc/internal/session"
+	"github.com/example/authentik-alipay-kyc/internal/stats"
 )
 
 type OIDCClient interface {
@@ -37,12 +39,20 @@ type AlipayClient interface {
 	Query(ctx context.Context, certifyID string) (alipay.QueryResponse, error)
 }
 
+type StatsStore interface {
+	Snapshot() (stats.Counters, error)
+	IncrementTotal() error
+	IncrementSuccess() error
+	IncrementFailure() error
+}
+
 type Dependencies struct {
 	Config     config.Config
 	Logger     *slog.Logger
 	OIDC       OIDCClient
 	Authentik  AuthentikClient
 	Alipay     AlipayClient
+	Stats      StatsStore
 	StaticFS   http.FileSystem
 	HTTPClient *http.Client
 }
@@ -53,6 +63,7 @@ type Server struct {
 	oidc      OIDCClient
 	authentik AuthentikClient
 	alipay    AlipayClient
+	stats     StatsStore
 	staticFS  http.FileSystem
 	sessions  *session.Store
 }
@@ -72,6 +83,7 @@ func New(deps Dependencies) *Server {
 		oidc:      deps.OIDC,
 		authentik: deps.Authentik,
 		alipay:    deps.Alipay,
+		stats:     deps.Stats,
 		staticFS:  deps.StaticFS,
 		sessions:  session.New(deps.Config.Session),
 	}
@@ -84,6 +96,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /auth/callback", s.oidcCallback)
 	mux.HandleFunc("POST /auth/logout", s.logout)
 	mux.HandleFunc("GET /api/me", s.me)
+	mux.HandleFunc("GET /api/stats", s.statsSnapshot)
 	mux.HandleFunc("POST /api/kyc/start", s.startKYC)
 	mux.HandleFunc("POST /api/kyc/confirm", s.confirmKYC)
 	mux.HandleFunc("POST /api/alipay/notify", s.alipayNotify)
@@ -199,6 +212,25 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
+func (s *Server) statsSnapshot(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeStatsAPI(r) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="stats"`)
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if s.stats == nil {
+		writeError(w, http.StatusInternalServerError, "stats store is not configured")
+		return
+	}
+	counters, err := s.stats.Snapshot()
+	if err != nil {
+		s.logger.Warn("failed to read stats", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to read stats")
+		return
+	}
+	writeJSON(w, http.StatusOK, counters)
+}
+
 func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 	userID, ok := s.currentUserID(r)
 	if !ok {
@@ -223,14 +255,16 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "id_number must be a 15 or 18 character identity card number")
 		return
 	}
-
+	s.recordTotal()
 	state, err := oidc.RandomToken()
 	if err != nil {
+		s.recordFailure()
 		writeError(w, http.StatusInternalServerError, "failed to create verification state")
 		return
 	}
 	orderToken, err := oidc.RandomToken()
 	if err != nil {
+		s.recordFailure()
 		writeError(w, http.StatusInternalServerError, "failed to create order number")
 		return
 	}
@@ -239,12 +273,14 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 
 	initResp, err := s.alipay.Initialize(r.Context(), outerOrderNo, req.Name, idNumber, returnURL)
 	if err != nil {
+		s.recordFailure()
 		s.logger.Warn("alipay initialize failed", "user_id", userID, "error", err)
 		writeError(w, http.StatusBadGateway, "failed to initialize alipay verification")
 		return
 	}
 	certifyURL, err := s.alipay.CertifyURL(initResp.CertifyID)
 	if err != nil {
+		s.recordFailure()
 		writeError(w, http.StatusBadGateway, "failed to create alipay certify url")
 		return
 	}
@@ -256,6 +292,7 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		session.PendingIDHashKey: identitycrypto.IDHash(idNumber, s.cfg.HashPepper),
 		session.PendingLast4Key:  identitycrypto.Last4(idNumber),
 	}); err != nil {
+		s.recordFailure()
 		writeError(w, http.StatusInternalServerError, "failed to save verification session")
 		return
 	}
@@ -301,11 +338,13 @@ func (s *Server) confirmKYC(w http.ResponseWriter, r *http.Request) {
 
 	queryResp, err := s.alipay.Query(r.Context(), certifyID)
 	if err != nil {
+		s.settleFailure(r, w)
 		s.logger.Warn("alipay query failed", "user_id", userID, "certify_id", certifyID, "error", err)
 		writeError(w, http.StatusBadGateway, "failed to confirm alipay verification")
 		return
 	}
 	if strings.ToUpper(queryResp.Passed) != "T" {
+		s.settleFailure(r, w)
 		writeError(w, http.StatusConflict, "alipay verification has not passed")
 		return
 	}
@@ -319,24 +358,22 @@ func (s *Server) confirmKYC(w http.ResponseWriter, r *http.Request) {
 		NameMasked: stringValue(sess.Values[session.PendingNameKey]),
 	}
 	if attr.IDHash == "" || attr.IDLast4 == "" || attr.NameMasked == "" {
+		s.settleFailure(r, w)
 		writeError(w, http.StatusBadRequest, "pending verification data is missing")
 		return
 	}
 	if err := s.authentik.MarkVerified(r.Context(), userID, attr); err != nil {
+		s.settleFailure(r, w)
 		s.logger.Warn("authentik update failed", "user_id", userID, "error", err)
 		writeError(w, http.StatusBadGateway, "failed to write verification to authentik")
 		return
 	}
-	if err := s.sessions.Save(r, w, map[interface{}]interface{}{
-		session.KYCStateKey:      nil,
-		session.CertifyIDKey:     nil,
-		session.PendingNameKey:   nil,
-		session.PendingIDHashKey: nil,
-		session.PendingLast4Key:  nil,
-	}); err != nil {
+	if err := s.clearPendingKYC(r, w); err != nil {
+		s.settleFailure(r, w)
 		writeError(w, http.StatusInternalServerError, "failed to clear verification session")
 		return
 	}
+	s.recordSuccess()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"verified": true,
 		"kyc":      attr,
@@ -374,6 +411,58 @@ func (s *Server) currentUserID(r *http.Request) (string, bool) {
 	}
 	userID, _ := sess.Values[session.UserIDKey].(string)
 	return userID, userID != ""
+}
+
+func (s *Server) authorizeStatsAPI(r *http.Request) bool {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if token == "" || s.cfg.StatsAPIToken == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.StatsAPIToken)) == 1
+}
+
+func (s *Server) recordTotal() {
+	if s.stats == nil {
+		return
+	}
+	if err := s.stats.IncrementTotal(); err != nil {
+		s.logger.Warn("failed to increment total stats", "error", err)
+	}
+}
+
+func (s *Server) recordSuccess() {
+	if s.stats == nil {
+		return
+	}
+	if err := s.stats.IncrementSuccess(); err != nil {
+		s.logger.Warn("failed to increment success stats", "error", err)
+	}
+}
+
+func (s *Server) recordFailure() {
+	if s.stats == nil {
+		return
+	}
+	if err := s.stats.IncrementFailure(); err != nil {
+		s.logger.Warn("failed to increment failure stats", "error", err)
+	}
+}
+
+func (s *Server) settleFailure(r *http.Request, w http.ResponseWriter) {
+	s.recordFailure()
+	if err := s.clearPendingKYC(r, w); err != nil {
+		s.logger.Warn("failed to clear failed verification session", "error", err)
+	}
+}
+
+func (s *Server) clearPendingKYC(r *http.Request, w http.ResponseWriter) error {
+	return s.sessions.Save(r, w, map[interface{}]interface{}{
+		session.KYCStateKey:      nil,
+		session.CertifyIDKey:     nil,
+		session.PendingNameKey:   nil,
+		session.PendingIDHashKey: nil,
+		session.PendingLast4Key:  nil,
+	})
 }
 
 func readJSON(r *http.Request, out interface{}) error {

@@ -15,6 +15,7 @@ import (
 	"github.com/example/authentik-alipay-kyc/internal/config"
 	"github.com/example/authentik-alipay-kyc/internal/oidc"
 	"github.com/example/authentik-alipay-kyc/internal/server"
+	"github.com/example/authentik-alipay-kyc/internal/stats"
 )
 
 func main() {
@@ -37,12 +38,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	statsStore, err := stats.NewStore(cfg.StatsFile)
+	if err != nil {
+		logger.Error("configure stats store", "error", err)
+		os.Exit(1)
+	}
+
 	app := server.New(server.Dependencies{
 		Config:     cfg,
 		Logger:     logger,
 		OIDC:       oidcClient,
 		Authentik:  authentik.NewClient(cfg.Authentik),
 		Alipay:     alipay.NewClient(cfg.Alipay),
+		Stats:      statsStore,
 		StaticFS:   server.StaticFiles(),
 		HTTPClient: http.DefaultClient,
 	})

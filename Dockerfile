@@ -16,7 +16,11 @@ COPY . .
 COPY --from=web-build /src/internal/server/dist ./internal/server/dist
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/alipay-kyc ./cmd/alipay-kyc
 
+FROM debian:bookworm-slim AS runtime-data
+RUN mkdir -p /data && chown 65532:65532 /data
+
 FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=runtime-data --chown=nonroot:nonroot /data /data
 COPY --from=go-build /out/alipay-kyc /alipay-kyc
 EXPOSE 8080
 USER nonroot:nonroot

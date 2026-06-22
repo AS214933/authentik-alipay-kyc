@@ -12,6 +12,8 @@ Flow:
 
 The ID number is not stored. The service keeps only an HMAC-SHA256 hash, ID last four characters, masked name with only the last character visible, channel, and verification time.
 
+Verification counters are stored in a local JSON file and are not shown in the frontend. They can be read through an authenticated API.
+
 ## authentik Setup
 
 Create an OAuth2/OpenID Provider and an Application named `实名认证`.
@@ -68,6 +70,8 @@ Configure the Alipay application for identity verification and set the return UR
 | `SESSION_KEYS` | production | generated | Comma-separated base64 keys, at least 32 bytes each. Generate with `openssl rand -base64 64`. |
 | `SESSION_SECURE` | no | derived | Secure cookie flag. Defaults to true for HTTPS `PUBLIC_URL`. |
 | `HASH_PEPPER` | yes | empty | Secret HMAC key for ID hashes. |
+| `STATS_FILE` | no | `/data/stats.json` | Local JSON file storing total, success, and failure counters. |
+| `STATS_API_TOKEN` | yes | empty | Bearer token required for `GET /api/stats`. |
 | `OIDC_ISSUER` | yes | empty | authentik provider issuer URL. Use the exact issuer from authentik discovery, usually ending with `/`, for example `https://auth.example.com/application/o/alipay-kyc/`. |
 | `OIDC_CLIENT_ID` | yes | empty | OIDC client ID. |
 | `OIDC_CLIENT_SECRET` | yes | empty | OIDC client secret. |
@@ -98,6 +102,26 @@ Docker:
 
 ```bash
 docker compose up --build
+```
+
+`docker-compose.yml` uses a named volume for `/data` so the local stats file survives container rebuilds. If you replace it with a bind mount such as `./data:/data`, make sure the directory is writable by container UID `65532`.
+
+Stats API:
+
+```bash
+curl -H "Authorization: Bearer $STATS_API_TOKEN" \
+  https://<kyc-service>/api/stats
+```
+
+Example response:
+
+```json
+{
+  "total": 12,
+  "success": 10,
+  "failure": 2,
+  "updated_at": "2026-06-22T09:00:00Z"
+}
 ```
 
 ## GHCR

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -17,6 +18,7 @@ import (
 	"github.com/example/authentik-alipay-kyc/internal/authentik"
 	"github.com/example/authentik-alipay-kyc/internal/config"
 	"github.com/example/authentik-alipay-kyc/internal/oidc"
+	"github.com/example/authentik-alipay-kyc/internal/stats"
 )
 
 type fakeOIDC struct{}
@@ -70,12 +72,14 @@ func TestKYCFlowWritesAuthentikAttribute(t *testing.T) {
 		Username:   "alice",
 		Attributes: map[string]interface{}{},
 	}}
+	statsStore := testStats(t)
 	srv := New(Dependencies{
 		Config:    testConfig(),
 		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 		OIDC:      fakeOIDC{},
 		Authentik: ak,
 		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     statsStore,
 		StaticFS: http.FS(fstest.MapFS{
 			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
 		}),
@@ -119,6 +123,53 @@ func TestKYCFlowWritesAuthentikAttribute(t *testing.T) {
 	if !ak.attr.Verified || ak.attr.Channel != "alipay" || ak.attr.IDLast4 != "002X" || ak.attr.NameMasked != "*三" || ak.attr.IDHash == "" {
 		t.Fatalf("unexpected authentik attr: %+v", ak.attr)
 	}
+	counters, err := statsStore.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counters.Total != 1 || counters.Success != 1 || counters.Failure != 0 {
+		t.Fatalf("unexpected counters: %+v", counters)
+	}
+}
+
+func TestStatsAPIRequiresBearerToken(t *testing.T) {
+	statsStore := testStats(t)
+	if err := statsStore.IncrementTotal(); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Dependencies{
+		Config:    testConfig(),
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     statsStore,
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated stats status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/stats", nil)
+	req.Header.Set("Authorization", "Bearer stats-token")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("authenticated stats status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var counters stats.Counters
+	if err := json.Unmarshal(rec.Body.Bytes(), &counters); err != nil {
+		t.Fatal(err)
+	}
+	if counters.Total != 1 {
+		t.Fatalf("stats total = %d, want 1", counters.Total)
+	}
 }
 
 func userCookie(t *testing.T, srv *Server) []*http.Cookie {
@@ -154,9 +205,10 @@ func testConfig() config.Config {
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("a"), 64))
 	sessionKeys, _ := base64.StdEncoding.DecodeString(key)
 	return config.Config{
-		HTTPAddr:   ":8080",
-		PublicURL:  "https://kyc.example.com",
-		HashPepper: "pepper",
+		HTTPAddr:      ":8080",
+		PublicURL:     "https://kyc.example.com",
+		HashPepper:    "pepper",
+		StatsAPIToken: "stats-token",
 		OIDC: config.OIDCConfig{
 			Issuer:       "https://authentik.example.com/application/o/alipay-kyc/",
 			ClientID:     "client",
@@ -182,4 +234,13 @@ func testConfig() config.Config {
 			MaxAge:   3600,
 		},
 	}
+}
+
+func testStats(t *testing.T) *stats.Store {
+	t.Helper()
+	store, err := stats.NewStore(filepath.Join(t.TempDir(), "stats.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
 }

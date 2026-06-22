@@ -18,6 +18,8 @@ type Config struct {
 	PublicURL      string
 	HashPepper     string
 	TrustedProxies []string
+	StatsFile      string
+	StatsAPIToken  string
 	OIDC           OIDCConfig
 	Authentik      AuthentikConfig
 	Alipay         AlipayConfig
@@ -86,6 +88,8 @@ func Load() (Config, error) {
 		PublicURL:      publicURL,
 		HashPepper:     getenv("HASH_PEPPER", ""),
 		TrustedProxies: splitCSV(getenv("TRUSTED_PROXIES", "")),
+		StatsFile:      getenv("STATS_FILE", "/data/stats.json"),
+		StatsAPIToken:  getenv("STATS_API_TOKEN", ""),
 		OIDC: OIDCConfig{
 			Issuer:       getenv("OIDC_ISSUER", ""),
 			ClientID:     getenv("OIDC_CLIENT_ID", ""),
@@ -125,6 +129,9 @@ func Load() (Config, error) {
 
 	if cfg.HashPepper == "" {
 		return Config{}, errors.New("HASH_PEPPER is required")
+	}
+	if cfg.StatsAPIToken == "" {
+		return Config{}, errors.New("STATS_API_TOKEN is required")
 	}
 	if cfg.OIDC.Issuer == "" || cfg.OIDC.ClientID == "" || cfg.OIDC.ClientSecret == "" {
 		return Config{}, errors.New("OIDC_ISSUER, OIDC_CLIENT_ID, and OIDC_CLIENT_SECRET are required")
