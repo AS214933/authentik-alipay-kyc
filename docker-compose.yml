@@ -12,7 +12,7 @@ services:
       STATS_API_TOKEN: "${STATS_API_TOKEN}"
       KYC_PII_DIR: "/data/kyc_pii"
       PII_ENCRYPTION_PUBLIC_KEY_TYPE: "${PII_ENCRYPTION_PUBLIC_KEY_TYPE:-rsa}"
-      PII_ENCRYPTION_PUBLIC_KEY: "${PII_ENCRYPTION_PUBLIC_KEY}"
+      PII_ENCRYPTION_PUBLIC_KEY_FILE: "/pii-public.pem"
       OIDC_ISSUER: "https://authentik.example.com/application/o/alipay-kyc/"
       OIDC_CLIENT_ID: "${OIDC_CLIENT_ID}"
       OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET}"
@@ -28,6 +28,7 @@ services:
       ALIPAY_CERT_TYPE: "IDENTITY_CARD"
     volumes:
       - alipay-kyc-data:/data
+      - ./pii-public.pem:/pii-public.pem:ro
 
 volumes:
   alipay-kyc-data:

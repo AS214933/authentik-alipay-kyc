@@ -3,10 +3,58 @@ package config
 import (
 	"bytes"
 	"encoding/base64"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestLoadPreservesOIDCIssuerTrailingSlash(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OIDC.Issuer != "https://auth.example.com/application/o/alipay-kyc/" {
+		t.Fatalf("OIDC issuer = %q", cfg.OIDC.Issuer)
+	}
+}
+
+func TestLoadReadsPIIPublicKeyFromFile(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("PII_ENCRYPTION_PUBLIC_KEY", "")
+	path := filepath.Join(t.TempDir(), "pii-public.pem")
+	if err := os.WriteFile(path, []byte(testRSAPublicKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PII_ENCRYPTION_PUBLIC_KEY_FILE", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PIIPublicKeyPEM != testRSAPublicKey {
+		t.Fatalf("PII public key was not loaded from file")
+	}
+}
+
+func TestLoadRejectsBothPIIPublicKeyEnvForms(t *testing.T) {
+	setRequiredEnv(t)
+	path := filepath.Join(t.TempDir(), "pii-public.pem")
+	if err := os.WriteFile(path, []byte(testRSAPublicKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PII_ENCRYPTION_PUBLIC_KEY_FILE", path)
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "cannot both be set") {
+		t.Fatalf("Load error = %v, want both key forms rejected", err)
+	}
+}
+
+func setRequiredEnv(t *testing.T) {
+	t.Helper()
 	t.Setenv("PUBLIC_URL", "https://kyc.example.com")
 	t.Setenv("SESSION_KEYS", base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("a"), 64)))
 	t.Setenv("HASH_PEPPER", "pepper")
@@ -20,14 +68,6 @@ func TestLoadPreservesOIDCIssuerTrailingSlash(t *testing.T) {
 	t.Setenv("ALIPAY_APP_ID", "app-id")
 	t.Setenv("ALIPAY_APP_PRIVATE_KEY", "private-key")
 	t.Setenv("ALIPAY_PUBLIC_KEY", "public-key")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.OIDC.Issuer != "https://auth.example.com/application/o/alipay-kyc/" {
-		t.Fatalf("OIDC issuer = %q", cfg.OIDC.Issuer)
-	}
 }
 
 const testRSAPublicKey = `-----BEGIN PUBLIC KEY-----

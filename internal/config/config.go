@@ -87,6 +87,10 @@ func Load() (Config, error) {
 	redirectURL := getenv("OIDC_REDIRECT_URL", publicURL+"/auth/callback")
 	callbackURL := getenv("ALIPAY_CALLBACK_URL", publicURL+"/api/alipay/notify")
 	returnURL := getenv("ALIPAY_RETURN_URL", publicURL+"/verify/callback")
+	piiPublicKeyPEM, err := loadPEMEnv("PII_ENCRYPTION_PUBLIC_KEY", "PII_ENCRYPTION_PUBLIC_KEY_FILE")
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		HTTPAddr:         getenv("HTTP_ADDR", ":8080"),
@@ -97,7 +101,7 @@ func Load() (Config, error) {
 		StatsAPIToken:    getenv("STATS_API_TOKEN", ""),
 		PIIDir:           getenv("KYC_PII_DIR", "/data/kyc_pii"),
 		PIIPublicKeyType: strings.ToLower(getenv("PII_ENCRYPTION_PUBLIC_KEY_TYPE", "rsa")),
-		PIIPublicKeyPEM:  normalizePEM(getenv("PII_ENCRYPTION_PUBLIC_KEY", "")),
+		PIIPublicKeyPEM:  piiPublicKeyPEM,
 		KYCTimeout:       secondsEnv("KYC_TIMEOUT_SECONDS", 1800),
 		KYCPollInterval:  secondsEnv("KYC_POLL_INTERVAL_SECONDS", 60),
 		OIDC: OIDCConfig{
@@ -144,7 +148,7 @@ func Load() (Config, error) {
 		return Config{}, errors.New("STATS_API_TOKEN is required")
 	}
 	if cfg.PIIDir == "" || cfg.PIIPublicKeyPEM == "" {
-		return Config{}, errors.New("KYC_PII_DIR and PII_ENCRYPTION_PUBLIC_KEY are required")
+		return Config{}, errors.New("KYC_PII_DIR and PII_ENCRYPTION_PUBLIC_KEY or PII_ENCRYPTION_PUBLIC_KEY_FILE are required")
 	}
 	if cfg.PIIPublicKeyType != "rsa" && cfg.PIIPublicKeyType != "sm2" {
 		return Config{}, errors.New("PII_ENCRYPTION_PUBLIC_KEY_TYPE must be rsa or sm2")
@@ -227,6 +231,30 @@ func normalizePEM(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.ReplaceAll(value, `\n`, "\n")
 	return value
+}
+
+func loadPEMEnv(valueName, fileName string) (string, error) {
+	value := getenv(valueName, "")
+	filePath := getenv(fileName, "")
+	if value != "" && filePath != "" {
+		return "", fmt.Errorf("%s and %s cannot both be set", valueName, fileName)
+	}
+	if filePath != "" {
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return "", fmt.Errorf("read %s %q: %w", fileName, filePath, err)
+		}
+		return normalizePEM(string(data)), nil
+	}
+
+	value = normalizePEM(value)
+	if value == "" || strings.Contains(value, "-----BEGIN ") {
+		return value, nil
+	}
+	if data, err := os.ReadFile(value); err == nil {
+		return normalizePEM(string(data)), nil
+	}
+	return value, nil
 }
 
 func parseSessionKeys(value string) ([][]byte, error) {
