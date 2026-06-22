@@ -237,7 +237,7 @@ func (c *Client) verifyResponse(raw json.RawMessage, signature string) error {
 func canonicalize(params url.Values) string {
 	keys := make([]string, 0, len(params))
 	for key := range params {
-		if key == "sign" || key == "sign_type" {
+		if key == "sign" {
 			continue
 		}
 		if params.Get(key) == "" {
