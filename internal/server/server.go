@@ -299,6 +299,7 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"redirect_url": certifyURL,
+		"certify_url":  certifyURL,
 		"certify_id":   initResp.CertifyID,
 		"state":        state,
 	})

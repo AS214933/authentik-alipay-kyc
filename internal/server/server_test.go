@@ -100,13 +100,18 @@ func TestKYCFlowWritesAuthentikAttribute(t *testing.T) {
 		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	var startResp struct {
-		State string `json:"state"`
+		State       string `json:"state"`
+		CertifyURL  string `json:"certify_url"`
+		RedirectURL string `json:"redirect_url"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &startResp); err != nil {
 		t.Fatal(err)
 	}
 	if startResp.State == "" {
 		t.Fatal("expected state")
+	}
+	if startResp.CertifyURL == "" || startResp.CertifyURL != startResp.RedirectURL {
+		t.Fatalf("unexpected certify url response: %+v", startResp)
 	}
 	cookies = mergeCookies(cookies, rec.Result().Cookies())
 

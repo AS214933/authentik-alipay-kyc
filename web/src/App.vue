@@ -58,6 +58,22 @@
             </div>
           </div>
 
+          <div v-else-if="state.qrCode" class="qr-panel">
+            <div class="qr-frame">
+              <img :src="state.qrCode" alt="支付宝实名认证二维码" />
+            </div>
+            <div class="qr-actions">
+              <button class="primary" type="button" :disabled="state.confirming" @click="confirmKyc(state.pendingState)">
+                <LoaderCircle v-if="state.confirming" class="spin" :size="18" />
+                <CircleCheck v-else :size="18" />
+                我已完成，检查结果
+              </button>
+              <button class="secondary" type="button" :disabled="state.confirming" @click="resetKyc">
+                重新填写
+              </button>
+            </div>
+          </div>
+
           <form v-else class="form" @submit.prevent="startKyc">
             <label>
               <span>姓名</span>
@@ -98,6 +114,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { AlertTriangle, CircleCheck, Clock3, LoaderCircle, LogIn, LogOut, ShieldCheck } from '@lucide/vue'
+import QRCode from 'qrcode'
 
 const state = reactive({
   loading: true,
@@ -107,6 +124,8 @@ const state = reactive({
   verified: false,
   user: {},
   kyc: null,
+  qrCode: '',
+  pendingState: '',
   error: ''
 })
 
@@ -187,7 +206,12 @@ async function startKyc() {
       method: 'POST',
       body: JSON.stringify({ name: form.name, id_number: form.id_number })
     })
-    window.location.href = data.redirect_url
+    state.pendingState = data.state || ''
+    state.qrCode = await QRCode.toDataURL(data.certify_url || data.redirect_url, {
+      errorCorrectionLevel: 'M',
+      margin: 1,
+      scale: 8
+    })
   } catch (err) {
     state.error = err.message
   } finally {
@@ -205,12 +229,20 @@ async function confirmKyc(stateValue) {
     })
     state.verified = true
     state.kyc = data.kyc
+    state.qrCode = ''
+    state.pendingState = ''
     window.history.replaceState({}, '', '/')
   } catch (err) {
     state.error = err.message
   } finally {
     state.confirming = false
   }
+}
+
+function resetKyc() {
+  state.qrCode = ''
+  state.pendingState = ''
+  state.error = ''
 }
 
 function formatDate(value) {
