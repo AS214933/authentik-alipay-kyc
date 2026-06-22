@@ -310,10 +310,17 @@ func (s *Server) statsSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	authenticated := s.adminAuthenticated(r)
+	response := map[string]interface{}{
 		"enabled":       s.cfg.Admin.Enabled,
-		"authenticated": s.adminAuthenticated(r),
-	})
+		"authenticated": authenticated,
+	}
+	if authenticated {
+		if token, ok := s.adminCSRFToken(r); ok {
+			response["csrf_token"] = token
+		}
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
@@ -332,18 +339,32 @@ func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	csrfToken, err := oidc.RandomToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create admin csrf token")
+		return
+	}
 	if err := s.sessions.Save(r, w, map[interface{}]interface{}{
-		session.AdminKey: "true",
+		session.AdminKey:     "true",
+		session.AdminCSRFKey: csrfToken,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save admin session")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"authenticated": true,
+		"csrf_token":    csrfToken,
+	})
 }
 
 func (s *Server) adminLogout(w http.ResponseWriter, r *http.Request) {
+	if !s.validAdminCSRF(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 	if err := s.sessions.Save(r, w, map[interface{}]interface{}{
-		session.AdminKey: nil,
+		session.AdminKey:     nil,
+		session.AdminCSRFKey: nil,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to clear admin session")
 		return
@@ -356,7 +377,7 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "admin import is disabled")
 		return
 	}
-	if !s.adminAuthenticated(r) {
+	if !s.validAdminCSRF(r) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -713,6 +734,30 @@ func (s *Server) adminAuthenticated(r *http.Request) bool {
 	}
 	value, _ := sess.Values[session.AdminKey].(string)
 	return value == "true"
+}
+
+func (s *Server) adminCSRFToken(r *http.Request) (string, bool) {
+	if !s.adminAuthenticated(r) {
+		return "", false
+	}
+	sess, err := s.sessions.Get(r)
+	if err != nil {
+		return "", false
+	}
+	token, _ := sess.Values[session.AdminCSRFKey].(string)
+	return token, token != ""
+}
+
+func (s *Server) validAdminCSRF(r *http.Request) bool {
+	expected, ok := s.adminCSRFToken(r)
+	if !ok {
+		return false
+	}
+	actual := strings.TrimSpace(r.Header.Get("X-CSRF-Token"))
+	if actual == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) == 1
 }
 
 func (s *Server) compareAdminPassword(password string) bool {

@@ -258,6 +258,7 @@ const admin = reactive({
   busy: false,
   enabled: false,
   authenticated: false,
+  csrfToken: '',
   result: null,
   error: '',
   success: ''
@@ -340,6 +341,7 @@ async function loadAdminStatus() {
     const data = await request('/api/admin/status')
     admin.enabled = Boolean(data.enabled)
     admin.authenticated = Boolean(data.authenticated)
+    admin.csrfToken = data.csrf_token || ''
   } catch (err) {
     admin.error = err.message
   } finally {
@@ -352,11 +354,12 @@ async function adminLogin() {
   admin.error = ''
   admin.success = ''
   try {
-    await request('/api/admin/login', {
+    const data = await request('/api/admin/login', {
       method: 'POST',
       body: JSON.stringify({ password: adminLoginForm.password })
     })
     admin.authenticated = true
+    admin.csrfToken = data.csrf_token || ''
     adminLoginForm.password = ''
   } catch (err) {
     admin.error = err.status === 401 ? '管理员密码不正确' : err.message
@@ -366,8 +369,13 @@ async function adminLogin() {
 }
 
 async function adminLogout() {
-  await request('/api/admin/logout', { method: 'POST', body: '{}' })
+  await request('/api/admin/logout', {
+    method: 'POST',
+    headers: adminCSRFHeaders(),
+    body: '{}'
+  })
   admin.authenticated = false
+  admin.csrfToken = ''
   admin.result = null
 }
 
@@ -379,6 +387,7 @@ async function adminImport() {
   try {
     const data = await request('/api/admin/import', {
       method: 'POST',
+      headers: adminCSRFHeaders(),
       body: JSON.stringify({
         user_id: adminImportForm.user_id,
         name: adminImportForm.name,
@@ -398,6 +407,10 @@ async function adminImport() {
   } finally {
     admin.busy = false
   }
+}
+
+function adminCSRFHeaders() {
+  return admin.csrfToken ? { 'X-CSRF-Token': admin.csrfToken } : {}
 }
 
 function login() {

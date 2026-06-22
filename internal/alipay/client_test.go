@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -70,6 +71,64 @@ func TestCallQueryResponseIgnoresStringMaterialInfo(t *testing.T) {
 	}
 	if response.Passed != "T" {
 		t.Fatalf("passed = %q, want T", response.Passed)
+	}
+}
+
+func TestCallRedactsSensitiveUpstreamError(t *testing.T) {
+	client := testClient(t, `{
+		"alipay_user_certify_open_query_response": {
+			"code": "40002",
+			"msg": "Invalid Arguments",
+			"sub_code": "isv.invalid-signature",
+			"sub_msg": "验签字符串 cert_name=张三&cert_no=11010519491231002X"
+		}
+	}`)
+
+	var response QueryResponse
+	err := client.call(context.Background(), MethodQuery, map[string]string{"certify_id": "abc"}, &response)
+	if err == nil {
+		t.Fatal("expected alipay error")
+	}
+	message := err.Error()
+	for _, sensitive := range []string{"张三", "11010519491231002X", "cert_no", "sub_msg"} {
+		if strings.Contains(message, sensitive) {
+			t.Fatalf("error leaked %q: %s", sensitive, message)
+		}
+	}
+	if !strings.Contains(message, "code=40002") || !strings.Contains(message, "sub_code=isv.invalid-signature") {
+		t.Fatalf("error lost useful codes: %s", message)
+	}
+}
+
+func TestCallRedactsUnexpectedHTTPBody(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "张三 11010519491231002X", http.StatusBadGateway)
+	}))
+	t.Cleanup(server.Close)
+	client := &Client{
+		gatewayURL: server.URL,
+		appID:      "2021000000000000",
+		privateKey: privateKey,
+		httpClient: server.Client(),
+	}
+
+	var response QueryResponse
+	err = client.call(context.Background(), MethodQuery, map[string]string{"certify_id": "abc"}, &response)
+	if err == nil {
+		t.Fatal("expected http error")
+	}
+	message := err.Error()
+	for _, sensitive := range []string{"张三", "11010519491231002X"} {
+		if strings.Contains(message, sensitive) {
+			t.Fatalf("error leaked %q: %s", sensitive, message)
+		}
+	}
+	if !strings.Contains(message, "<redacted len=") {
+		t.Fatalf("error did not include redacted summary: %s", message)
 	}
 }
 

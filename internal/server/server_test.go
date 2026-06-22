@@ -648,6 +648,108 @@ func TestAdminImportRequiresLogin(t *testing.T) {
 	}
 }
 
+func TestAdminImportRequiresCSRFToken(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.Password = "admin-secret"
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	admin := adminSession(t, handler, "admin-secret")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"张三","id_number":"11010519491231002X","verified":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range admin.cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("admin import without csrf status = %d, want %d body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+	}
+}
+
+func TestAdminStatusReturnsCSRFTokenWhenAuthenticated(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.Password = "admin-secret"
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	admin := adminSession(t, handler, "admin-secret")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	for _, cookie := range admin.cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Authenticated bool   `json:"authenticated"`
+		CSRFToken     string `json:"csrf_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Authenticated || body.CSRFToken != admin.csrfToken {
+		t.Fatalf("unexpected admin status body: %+v", body)
+	}
+}
+
+func TestAdminLogoutRequiresCSRFToken(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.Password = "admin-secret"
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	admin := adminSession(t, handler, "admin-secret")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/logout", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range admin.cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("admin logout without csrf status = %d, want %d body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+	}
+}
+
 func TestAdminImportWritesPIIAndAuthentikWithoutStats(t *testing.T) {
 	cfg := testConfig()
 	cfg.Admin.Enabled = true
@@ -673,12 +775,13 @@ func TestAdminImportWritesPIIAndAuthentikWithoutStats(t *testing.T) {
 	})
 	handler := srv.Handler()
 
-	cookies := adminCookies(t, handler, "admin-secret")
+	admin := adminSession(t, handler, "admin-secret")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"李四","id_number":"440524188001010014","verified":true}`))
 	req.Header.Set("Content-Type", "application/json")
-	for _, cookie := range cookies {
+	req.Header.Set("X-CSRF-Token", admin.csrfToken)
+	for _, cookie := range admin.cookies {
 		req.AddCookie(cookie)
 	}
 	handler.ServeHTTP(rec, req)
@@ -738,12 +841,13 @@ func TestAdminImportCanWriteUnverifiedAttribute(t *testing.T) {
 	})
 	handler := srv.Handler()
 
-	cookies := adminCookies(t, handler, "admin-secret")
+	admin := adminSession(t, handler, "admin-secret")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"李四","id_number":"440524188001010014","verified":false}`))
 	req.Header.Set("Content-Type", "application/json")
-	for _, cookie := range cookies {
+	req.Header.Set("X-CSRF-Token", admin.csrfToken)
+	for _, cookie := range admin.cookies {
 		req.AddCookie(cookie)
 	}
 	handler.ServeHTTP(rec, req)
@@ -769,7 +873,12 @@ func userCookie(t *testing.T, srv *Server) []*http.Cookie {
 	return rec.Result().Cookies()
 }
 
-func adminCookies(t *testing.T, handler http.Handler, password string) []*http.Cookie {
+type adminTestSession struct {
+	cookies   []*http.Cookie
+	csrfToken string
+}
+
+func adminSession(t *testing.T, handler http.Handler, password string) adminTestSession {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/login", strings.NewReader(`{"password":"`+password+`"}`))
@@ -778,7 +887,16 @@ func adminCookies(t *testing.T, handler http.Handler, password string) []*http.C
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin login status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	return rec.Result().Cookies()
+	var body struct {
+		CSRFToken string `json:"csrf_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.CSRFToken == "" {
+		t.Fatal("admin login did not return csrf token")
+	}
+	return adminTestSession{cookies: rec.Result().Cookies(), csrfToken: body.CSRFToken}
 }
 
 func mergeCookies(existing, updates []*http.Cookie) []*http.Cookie {

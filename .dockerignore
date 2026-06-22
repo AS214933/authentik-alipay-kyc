@@ -6,3 +6,10 @@ internal/server/dist
 coverage
 *.log
 tmp
+*.pem
+*.key
+.env
+.env.*
+data/
+alipay-kyc-data/
+kyc_pii/

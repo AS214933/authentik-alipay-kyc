@@ -159,7 +159,7 @@ func (c *Client) call(ctx context.Context, method string, biz interface{}, out i
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("alipay http status=%d body=%s", resp.StatusCode, string(body))
+		return fmt.Errorf("alipay http status=%d body=%s", resp.StatusCode, safeBodySummary(body))
 	}
 
 	var envelope map[string]json.RawMessage
@@ -169,7 +169,7 @@ func (c *Client) call(ctx context.Context, method string, biz interface{}, out i
 	responseKey := strings.ReplaceAll(method, ".", "_") + "_response"
 	raw, ok := envelope[responseKey]
 	if !ok {
-		return fmt.Errorf("alipay response missing %s: %s", responseKey, string(body))
+		return fmt.Errorf("alipay response missing %s body=%s", responseKey, safeBodySummary(body))
 	}
 	if sigRaw, ok := envelope["sign"]; ok && c.publicKey != nil {
 		var sig string
@@ -185,13 +185,12 @@ func (c *Client) call(ctx context.Context, method string, biz interface{}, out i
 		Code    string `json:"code"`
 		Msg     string `json:"msg"`
 		SubCode string `json:"sub_code"`
-		SubMsg  string `json:"sub_msg"`
 	}
 	if err := json.Unmarshal(raw, &apiResponse); err != nil {
 		return fmt.Errorf("decode alipay api response: %w", err)
 	}
 	if apiResponse.Code != "10000" {
-		return fmt.Errorf("alipay api error code=%s msg=%s sub_code=%s sub_msg=%s", apiResponse.Code, apiResponse.Msg, apiResponse.SubCode, apiResponse.SubMsg)
+		return fmt.Errorf("alipay api error code=%s msg=%s sub_code=%s", apiResponse.Code, apiResponse.Msg, apiResponse.SubCode)
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
 		return fmt.Errorf("decode alipay business response: %w", err)
@@ -254,6 +253,14 @@ func canonicalize(params url.Values) string {
 		parts = append(parts, key+"="+params.Get(key))
 	}
 	return strings.Join(parts, "&")
+}
+
+func safeBodySummary(body []byte) string {
+	body = []byte(strings.TrimSpace(string(body)))
+	if len(body) == 0 {
+		return "<empty>"
+	}
+	return fmt.Sprintf("<redacted len=%d>", len(body))
 }
 
 func parsePrivateKey(raw string) (*rsa.PrivateKey, error) {

@@ -64,7 +64,7 @@ func (c *Client) GetUser(ctx context.Context, userID string) (User, error) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return User{}, fmt.Errorf("authentik get user failed: status=%d body=%s", resp.StatusCode, string(body))
+		return User{}, fmt.Errorf("authentik get user failed: status=%d body=%s", resp.StatusCode, safeBodySummary(body))
 	}
 	var user User
 	if err := json.Unmarshal(body, &user); err != nil {
@@ -110,7 +110,7 @@ func (c *Client) MarkVerified(ctx context.Context, userID string, attr KYCAttrib
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("authentik update user failed: status=%d body=%s", resp.StatusCode, string(body))
+		return fmt.Errorf("authentik update user failed: status=%d body=%s", resp.StatusCode, safeBodySummary(body))
 	}
 	return nil
 }
@@ -118,4 +118,12 @@ func (c *Client) MarkVerified(ctx context.Context, userID string, attr KYCAttrib
 func (c *Client) auth(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(c.token))
 	req.Header.Set("Accept", "application/json")
+}
+
+func safeBodySummary(body []byte) string {
+	body = []byte(strings.TrimSpace(string(body)))
+	if len(body) == 0 {
+		return "<empty>"
+	}
+	return fmt.Sprintf("<redacted len=%d>", len(body))
 }

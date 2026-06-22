@@ -1,7 +1,12 @@
 node_modules/
 .env
+.env.*
+*.pem
+*.key
 *.log
 tmp/
 data/
+alipay-kyc-data/
+kyc_pii/
 internal/server/dist/*
 !internal/server/dist/keep.txt
