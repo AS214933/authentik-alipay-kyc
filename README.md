@@ -129,6 +129,13 @@ Mount `pii-public.pem` into the container and set `PII_ENCRYPTION_PUBLIC_KEY_FIL
 
 For SM2 public keys, set `PII_ENCRYPTION_PUBLIC_KEY_TYPE=sm2` and provide the SM2 public key as a PEM `PUBLIC KEY`.
 
+Decrypt a local PII record offline:
+
+```bash
+scripts/decrypt-pii-rsa.sh ./pii-private.pem ./alipay-kyc-data/kyc_pii/<id_hash>
+scripts/decrypt-pii-sm2.sh ./pii-private.pem ./alipay-kyc-data/kyc_pii/<id_hash>
+```
+
 Manual admin import:
 
 Set `ADMIN_ENABLED=true` and `ADMIN_PASSWORD` to enable `/admin/`. The admin page can import a user by authentik user ID, name, ID number, and a verified yes/no switch. Manual imports write the same local encrypted PII record and authentik attribute shape as the Alipay flow, using `channel: "admin"`, but do not increment the Alipay verification counters.
