@@ -14,18 +14,21 @@ import (
 )
 
 type Config struct {
-	HTTPAddr        string
-	PublicURL       string
-	HashPepper      string
-	TrustedProxies  []string
-	StatsFile       string
-	StatsAPIToken   string
-	KYCTimeout      time.Duration
-	KYCPollInterval time.Duration
-	OIDC            OIDCConfig
-	Authentik       AuthentikConfig
-	Alipay          AlipayConfig
-	Session         SessionConfig
+	HTTPAddr         string
+	PublicURL        string
+	HashPepper       string
+	TrustedProxies   []string
+	StatsFile        string
+	StatsAPIToken    string
+	PIIFile          string
+	PIIPublicKeyType string
+	PIIPublicKeyPEM  string
+	KYCTimeout       time.Duration
+	KYCPollInterval  time.Duration
+	OIDC             OIDCConfig
+	Authentik        AuthentikConfig
+	Alipay           AlipayConfig
+	Session          SessionConfig
 }
 
 type OIDCConfig struct {
@@ -86,14 +89,17 @@ func Load() (Config, error) {
 	returnURL := getenv("ALIPAY_RETURN_URL", publicURL+"/verify/callback")
 
 	cfg := Config{
-		HTTPAddr:        getenv("HTTP_ADDR", ":8080"),
-		PublicURL:       publicURL,
-		HashPepper:      getenv("HASH_PEPPER", ""),
-		TrustedProxies:  splitCSV(getenv("TRUSTED_PROXIES", "")),
-		StatsFile:       getenv("STATS_FILE", "/data/stats.json"),
-		StatsAPIToken:   getenv("STATS_API_TOKEN", ""),
-		KYCTimeout:      secondsEnv("KYC_TIMEOUT_SECONDS", 1800),
-		KYCPollInterval: secondsEnv("KYC_POLL_INTERVAL_SECONDS", 60),
+		HTTPAddr:         getenv("HTTP_ADDR", ":8080"),
+		PublicURL:        publicURL,
+		HashPepper:       getenv("HASH_PEPPER", ""),
+		TrustedProxies:   splitCSV(getenv("TRUSTED_PROXIES", "")),
+		StatsFile:        getenv("STATS_FILE", "/data/stats.json"),
+		StatsAPIToken:    getenv("STATS_API_TOKEN", ""),
+		PIIFile:          getenv("KYC_PII_FILE", "/data/kyc_pii.jsonl"),
+		PIIPublicKeyType: strings.ToLower(getenv("PII_ENCRYPTION_PUBLIC_KEY_TYPE", "rsa")),
+		PIIPublicKeyPEM:  normalizePEM(getenv("PII_ENCRYPTION_PUBLIC_KEY", "")),
+		KYCTimeout:       secondsEnv("KYC_TIMEOUT_SECONDS", 1800),
+		KYCPollInterval:  secondsEnv("KYC_POLL_INTERVAL_SECONDS", 60),
 		OIDC: OIDCConfig{
 			Issuer:       getenv("OIDC_ISSUER", ""),
 			ClientID:     getenv("OIDC_CLIENT_ID", ""),
@@ -136,6 +142,12 @@ func Load() (Config, error) {
 	}
 	if cfg.StatsAPIToken == "" {
 		return Config{}, errors.New("STATS_API_TOKEN is required")
+	}
+	if cfg.PIIFile == "" || cfg.PIIPublicKeyPEM == "" {
+		return Config{}, errors.New("KYC_PII_FILE and PII_ENCRYPTION_PUBLIC_KEY are required")
+	}
+	if cfg.PIIPublicKeyType != "rsa" && cfg.PIIPublicKeyType != "sm2" {
+		return Config{}, errors.New("PII_ENCRYPTION_PUBLIC_KEY_TYPE must be rsa or sm2")
 	}
 	if cfg.OIDC.Issuer == "" || cfg.OIDC.ClientID == "" || cfg.OIDC.ClientSecret == "" {
 		return Config{}, errors.New("OIDC_ISSUER, OIDC_CLIENT_ID, and OIDC_CLIENT_SECRET are required")

@@ -14,6 +14,7 @@ import (
 	"github.com/example/authentik-alipay-kyc/internal/authentik"
 	"github.com/example/authentik-alipay-kyc/internal/config"
 	"github.com/example/authentik-alipay-kyc/internal/oidc"
+	"github.com/example/authentik-alipay-kyc/internal/piistore"
 	"github.com/example/authentik-alipay-kyc/internal/server"
 	"github.com/example/authentik-alipay-kyc/internal/stats"
 )
@@ -44,6 +45,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	piiStore, err := piistore.NewStore(cfg.PIIFile, cfg.PIIPublicKeyType, cfg.PIIPublicKeyPEM)
+	if err != nil {
+		logger.Error("configure pii store", "error", err)
+		os.Exit(1)
+	}
+
 	app := server.New(server.Dependencies{
 		Config:     cfg,
 		Logger:     logger,
@@ -51,6 +58,7 @@ func main() {
 		Authentik:  authentik.NewClient(cfg.Authentik),
 		Alipay:     alipay.NewClient(cfg.Alipay),
 		Stats:      statsStore,
+		PII:        piiStore,
 		StaticFS:   server.StaticFiles(),
 		HTTPClient: http.DefaultClient,
 	})

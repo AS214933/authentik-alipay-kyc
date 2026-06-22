@@ -20,6 +20,7 @@ import (
 	"github.com/example/authentik-alipay-kyc/internal/config"
 	identitycrypto "github.com/example/authentik-alipay-kyc/internal/crypto"
 	"github.com/example/authentik-alipay-kyc/internal/oidc"
+	"github.com/example/authentik-alipay-kyc/internal/piistore"
 	"github.com/example/authentik-alipay-kyc/internal/session"
 	"github.com/example/authentik-alipay-kyc/internal/stats"
 )
@@ -47,6 +48,10 @@ type StatsStore interface {
 	IncrementFailure() error
 }
 
+type PIIStore interface {
+	Append(entry piistore.Entry) error
+}
+
 type Dependencies struct {
 	Config     config.Config
 	Logger     *slog.Logger
@@ -54,6 +59,7 @@ type Dependencies struct {
 	Authentik  AuthentikClient
 	Alipay     AlipayClient
 	Stats      StatsStore
+	PII        PIIStore
 	StaticFS   http.FileSystem
 	HTTPClient *http.Client
 }
@@ -65,6 +71,7 @@ type Server struct {
 	authentik AuthentikClient
 	alipay    AlipayClient
 	stats     StatsStore
+	pii       PIIStore
 	staticFS  http.FileSystem
 	sessions  *session.Store
 	pendingMu sync.Mutex
@@ -117,6 +124,7 @@ func New(deps Dependencies) *Server {
 		authentik: deps.Authentik,
 		alipay:    deps.Alipay,
 		stats:     deps.Stats,
+		pii:       deps.PII,
 		staticFS:  deps.StaticFS,
 		sessions:  session.New(deps.Config.Session),
 		pending:   map[string]pendingKYC{},
@@ -308,6 +316,11 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "id_number must be a 15 or 18 character identity card number")
 		return
 	}
+	sess, err := s.sessions.Get(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid session")
+		return
+	}
 	s.recordTotal()
 	state, err := oidc.RandomToken()
 	if err != nil {
@@ -336,6 +349,22 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		s.recordFailure()
 		writeError(w, http.StatusBadGateway, "failed to create alipay certify url")
 		return
+	}
+	if s.pii != nil {
+		if err := s.pii.Append(piistore.Entry{
+			UserID:       userID,
+			Username:     stringValue(sess.Values[session.UsernameKey]),
+			State:        state,
+			CertifyID:    initResp.CertifyID,
+			OuterOrderNo: outerOrderNo,
+			Name:         req.Name,
+			IDNumber:     idNumber,
+		}); err != nil {
+			s.recordFailure()
+			s.logger.Warn("failed to store encrypted pii", "user_id", userID, "certify_id", initResp.CertifyID, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to store verification identity")
+			return
+		}
 	}
 	pending := pendingKYC{
 		State:      state,

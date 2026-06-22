@@ -10,9 +10,11 @@ Flow:
 4. After Alipay returns, this service calls Alipay query API and only writes back when `passed == "T"`.
 5. authentik receives a user attribute containing verification status data.
 
-The ID number is not stored. The service keeps only an HMAC-SHA256 hash, ID last four characters, masked name with only the last character visible, channel, and verification time.
+authentik receives only an HMAC-SHA256 ID hash, ID last four characters, masked name with only the last character visible, channel, and verification time.
 
 Verification counters are stored in a local JSON file and are not shown in the frontend. They can be read through an authenticated API.
+
+The full submitted name and ID number are stored locally in an encrypted JSONL file. Each record uses AES-256-GCM for the PII payload and encrypts the data key with a configured RSA or SM2 public key. The private key is not required by the service and should be kept offline.
 
 Alipay verification stays pending for 30 minutes by default. Users can retry result checks from the browser, and the server also polls pending Alipay certifications on a one-minute interval.
 
@@ -74,6 +76,9 @@ Configure the Alipay application for identity verification and set the return UR
 | `HASH_PEPPER` | yes | empty | Secret HMAC key for ID hashes. |
 | `STATS_FILE` | no | `/data/stats.json` | Local JSON file storing total, success, and failure counters. |
 | `STATS_API_TOKEN` | yes | empty | Bearer token required for `GET /api/stats`. |
+| `KYC_PII_FILE` | no | `/data/kyc_pii.jsonl` | Append-only local file for encrypted submitted name and ID number records. |
+| `PII_ENCRYPTION_PUBLIC_KEY_TYPE` | no | `rsa` | Public key type for local PII encryption. Supported values: `rsa`, `sm2`. |
+| `PII_ENCRYPTION_PUBLIC_KEY` | yes | empty | PEM public key used to encrypt local PII records. RSA uses RSA-OAEP-SHA256; SM2 uses ASN.1 SM2 ciphertext. |
 | `KYC_TIMEOUT_SECONDS` | no | `1800` | Pending Alipay verification timeout. Defaults to 30 minutes. |
 | `KYC_POLL_INTERVAL_SECONDS` | no | `60` | Server-side polling interval for pending Alipay verification. |
 | `OIDC_ISSUER` | yes | empty | authentik provider issuer URL. Use the exact issuer from authentik discovery, usually ending with `/`, for example `https://auth.example.com/application/o/alipay-kyc/`. |
@@ -109,6 +114,17 @@ docker compose up --build
 ```
 
 `docker-compose.yml` uses a named volume for `/data` so the local stats file survives container rebuilds. If you replace it with a bind mount such as `./data:/data`, make sure the directory is writable by container UID `65532`.
+
+Generate an RSA key pair for local PII encryption:
+
+```bash
+openssl genrsa -out pii-private.pem 3072
+openssl rsa -in pii-private.pem -pubout -out pii-public.pem
+```
+
+Set `PII_ENCRYPTION_PUBLIC_KEY` to the public key PEM. Keep `pii-private.pem` outside the service host unless you need offline decryption.
+
+For SM2 public keys, set `PII_ENCRYPTION_PUBLIC_KEY_TYPE=sm2` and provide the SM2 public key as a PEM `PUBLIC KEY`.
 
 Stats API:
 

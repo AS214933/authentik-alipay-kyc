@@ -19,6 +19,7 @@ import (
 	"github.com/example/authentik-alipay-kyc/internal/authentik"
 	"github.com/example/authentik-alipay-kyc/internal/config"
 	"github.com/example/authentik-alipay-kyc/internal/oidc"
+	"github.com/example/authentik-alipay-kyc/internal/piistore"
 	"github.com/example/authentik-alipay-kyc/internal/stats"
 )
 
@@ -92,12 +93,26 @@ func (f *sequenceAlipay) Query(context.Context, string) (alipay.QueryResponse, e
 	return alipay.QueryResponse{Passed: passed}, nil
 }
 
+type fakePIIStore struct {
+	entries []piistore.Entry
+	err     error
+}
+
+func (f *fakePIIStore) Append(entry piistore.Entry) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.entries = append(f.entries, entry)
+	return nil
+}
+
 func TestKYCFlowWritesAuthentikAttribute(t *testing.T) {
 	ak := &fakeAuthentik{user: authentik.User{
 		ID:         1,
 		Username:   "alice",
 		Attributes: map[string]interface{}{},
 	}}
+	piiStore := &fakePIIStore{}
 	statsStore := testStats(t)
 	srv := New(Dependencies{
 		Config:    testConfig(),
@@ -106,6 +121,7 @@ func TestKYCFlowWritesAuthentikAttribute(t *testing.T) {
 		Authentik: ak,
 		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
 		Stats:     statsStore,
+		PII:       piiStore,
 		StaticFS: http.FS(fstest.MapFS{
 			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
 		}),
@@ -153,6 +169,15 @@ func TestKYCFlowWritesAuthentikAttribute(t *testing.T) {
 	}
 	if !ak.attr.Verified || ak.attr.Channel != "alipay" || ak.attr.IDLast4 != "002X" || ak.attr.NameMasked != "*三" || ak.attr.IDHash == "" {
 		t.Fatalf("unexpected authentik attr: %+v", ak.attr)
+	}
+	if len(piiStore.entries) != 1 {
+		t.Fatalf("pii entries = %d, want 1", len(piiStore.entries))
+	}
+	if piiStore.entries[0].Name != "张三" || piiStore.entries[0].IDNumber != "11010519491231002X" {
+		t.Fatalf("unexpected pii entry: %+v", piiStore.entries[0])
+	}
+	if piiStore.entries[0].CertifyID != "CERT123" || piiStore.entries[0].State != startResp.State {
+		t.Fatalf("unexpected pii entry identity: %+v", piiStore.entries[0])
 	}
 	counters, err := statsStore.Snapshot()
 	if err != nil {
@@ -236,6 +261,42 @@ func TestKYCConfirmCanBeRetriedAfterNotPassed(t *testing.T) {
 	}
 	if counters.Total != 1 || counters.Success != 1 || counters.Failure != 0 {
 		t.Fatalf("unexpected counters after retry: %+v", counters)
+	}
+}
+
+func TestKYCStartFailsWhenPIIStoreFails(t *testing.T) {
+	statsStore := testStats(t)
+	srv := New(Dependencies{
+		Config:    testConfig(),
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     statsStore,
+		PII:       &fakePIIStore{err: errors.New("disk full")},
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	cookies := userCookie(t, srv)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"name":"张三","id_number":"11010519491231002X"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	counters, err := statsStore.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counters.Total != 1 || counters.Success != 0 || counters.Failure != 1 {
+		t.Fatalf("unexpected counters after pii failure: %+v", counters)
 	}
 }
 
