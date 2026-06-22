@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -52,6 +53,7 @@ func (f *fakeAuthentik) MarkVerified(_ context.Context, _ string, attr authentik
 type fakeAlipay struct {
 	certifyID string
 	passed    string
+	queryErr  error
 }
 
 func (f fakeAlipay) Initialize(context.Context, string, string, string, string) (alipay.InitializeResponse, error) {
@@ -63,16 +65,25 @@ func (f fakeAlipay) CertifyURL(certifyID string) (string, error) {
 }
 
 func (f fakeAlipay) Query(context.Context, string) (alipay.QueryResponse, error) {
+	if f.queryErr != nil {
+		return alipay.QueryResponse{}, f.queryErr
+	}
 	return alipay.QueryResponse{Passed: f.passed}, nil
 }
 
 type sequenceAlipay struct {
 	fakeAlipay
 	passes []string
+	errs   []error
 	calls  int
 }
 
 func (f *sequenceAlipay) Query(context.Context, string) (alipay.QueryResponse, error) {
+	if f.calls < len(f.errs) && f.errs[f.calls] != nil {
+		err := f.errs[f.calls]
+		f.calls++
+		return alipay.QueryResponse{}, err
+	}
 	passed := f.fakeAlipay.passed
 	if f.calls < len(f.passes) {
 		passed = f.passes[f.calls]
@@ -228,6 +239,190 @@ func TestKYCConfirmCanBeRetriedAfterNotPassed(t *testing.T) {
 	}
 }
 
+func TestKYCConfirmCanBeRetriedAfterQueryError(t *testing.T) {
+	ak := &fakeAuthentik{user: authentik.User{
+		ID:         1,
+		Username:   "alice",
+		Attributes: map[string]interface{}{},
+	}}
+	alipayClient := &sequenceAlipay{
+		fakeAlipay: fakeAlipay{certifyID: "CERT123"},
+		errs:       []error{errors.New("temporary network error")},
+		passes:     []string{"", "T"},
+	}
+	statsStore := testStats(t)
+	srv := New(Dependencies{
+		Config:    testConfig(),
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: ak,
+		Alipay:    alipayClient,
+		Stats:     statsStore,
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	cookies := userCookie(t, srv)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"name":"张三","id_number":"11010519491231002X"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var startResp struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &startResp); err != nil {
+		t.Fatal(err)
+	}
+	cookies = mergeCookies(cookies, rec.Result().Cookies())
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/confirm", strings.NewReader(`{"state":"`+startResp.State+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("first confirm status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/confirm", strings.NewReader(`{"state":"`+startResp.State+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second confirm status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !ak.attr.Verified {
+		t.Fatalf("expected authentik attr to be verified: %+v", ak.attr)
+	}
+}
+
+func TestPendingKYCWorkerCanCompleteVerification(t *testing.T) {
+	ak := &fakeAuthentik{user: authentik.User{
+		ID:         1,
+		Username:   "alice",
+		Attributes: map[string]interface{}{},
+	}}
+	statsStore := testStats(t)
+	srv := New(Dependencies{
+		Config:    testConfig(),
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: ak,
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     statsStore,
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	cookies := userCookie(t, srv)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"name":"张三","id_number":"11010519491231002X"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var startResp struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &startResp); err != nil {
+		t.Fatal(err)
+	}
+	cookies = mergeCookies(cookies, rec.Result().Cookies())
+
+	srv.checkPendingKYC(context.Background())
+	if !ak.attr.Verified {
+		t.Fatalf("expected worker to mark user verified: %+v", ak.attr)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/confirm", strings.NewReader(`{"state":"`+startResp.State+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirm after worker status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPendingKYCExpiresAfterTimeout(t *testing.T) {
+	cfg := testConfig()
+	cfg.KYCTimeout = time.Nanosecond
+	statsStore := testStats(t)
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "F"},
+		Stats:     statsStore,
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	cookies := userCookie(t, srv)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"name":"张三","id_number":"11010519491231002X"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var startResp struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &startResp); err != nil {
+		t.Fatal(err)
+	}
+	cookies = mergeCookies(cookies, rec.Result().Cookies())
+
+	time.Sleep(time.Millisecond)
+	srv.checkPendingKYC(context.Background())
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/confirm", strings.NewReader(`{"state":"`+startResp.State+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusGone {
+		t.Fatalf("expired confirm status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	counters, err := statsStore.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counters.Total != 1 || counters.Success != 0 || counters.Failure != 1 {
+		t.Fatalf("unexpected counters after timeout: %+v", counters)
+	}
+}
+
 func TestAlipayReturnShowsDesktopInstruction(t *testing.T) {
 	srv := New(Dependencies{
 		Config:    testConfig(),
@@ -331,10 +526,12 @@ func testConfig() config.Config {
 	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("a"), 64))
 	sessionKeys, _ := base64.StdEncoding.DecodeString(key)
 	return config.Config{
-		HTTPAddr:      ":8080",
-		PublicURL:     "https://kyc.example.com",
-		HashPepper:    "pepper",
-		StatsAPIToken: "stats-token",
+		HTTPAddr:        ":8080",
+		PublicURL:       "https://kyc.example.com",
+		HashPepper:      "pepper",
+		StatsAPIToken:   "stats-token",
+		KYCTimeout:      30 * time.Minute,
+		KYCPollInterval: time.Minute,
 		OIDC: config.OIDCConfig{
 			Issuer:       "https://authentik.example.com/application/o/alipay-kyc/",
 			ClientID:     "client",

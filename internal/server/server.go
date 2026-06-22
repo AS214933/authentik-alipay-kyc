@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/example/authentik-alipay-kyc/internal/alipay"
@@ -66,16 +67,48 @@ type Server struct {
 	stats     StatsStore
 	staticFS  http.FileSystem
 	sessions  *session.Store
+	pendingMu sync.Mutex
+	settleMu  sync.Mutex
+	pending   map[string]pendingKYC
+	terminal  map[string]terminalKYC
 }
 
 type errorResponse struct {
 	Error string `json:"error"`
 }
 
+type pendingKYC struct {
+	State      string
+	CertifyID  string
+	UserID     string
+	NameMasked string
+	IDHash     string
+	IDLast4    string
+	ExpiresAt  time.Time
+}
+
+type settleKYCResult struct {
+	Passed    bool
+	Expired   bool
+	Attribute authentik.KYCAttribute
+}
+
+type terminalKYC struct {
+	Expired   bool
+	Attribute authentik.KYCAttribute
+	ExpiresAt time.Time
+}
+
 func New(deps Dependencies) *Server {
 	logger := deps.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if deps.Config.KYCTimeout <= 0 {
+		deps.Config.KYCTimeout = 30 * time.Minute
+	}
+	if deps.Config.KYCPollInterval <= 0 {
+		deps.Config.KYCPollInterval = time.Minute
 	}
 	return &Server{
 		cfg:       deps.Config,
@@ -86,6 +119,25 @@ func New(deps Dependencies) *Server {
 		stats:     deps.Stats,
 		staticFS:  deps.StaticFS,
 		sessions:  session.New(deps.Config.Session),
+		pending:   map[string]pendingKYC{},
+		terminal:  map[string]terminalKYC{},
+	}
+}
+
+func (s *Server) StartKYCWorker(ctx context.Context) {
+	interval := s.cfg.KYCPollInterval
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.checkPendingKYC(ctx)
+		}
 	}
 }
 
@@ -285,24 +337,35 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "failed to create alipay certify url")
 		return
 	}
+	pending := pendingKYC{
+		State:      state,
+		CertifyID:  initResp.CertifyID,
+		UserID:     userID,
+		NameMasked: identitycrypto.MaskChineseName(req.Name),
+		IDHash:     identitycrypto.IDHash(idNumber, s.cfg.HashPepper),
+		IDLast4:    identitycrypto.Last4(idNumber),
+		ExpiresAt:  time.Now().UTC().Add(s.cfg.KYCTimeout),
+	}
 
 	if err := s.sessions.Save(r, w, map[interface{}]interface{}{
 		session.KYCStateKey:      state,
 		session.CertifyIDKey:     initResp.CertifyID,
-		session.PendingNameKey:   identitycrypto.MaskChineseName(req.Name),
-		session.PendingIDHashKey: identitycrypto.IDHash(idNumber, s.cfg.HashPepper),
-		session.PendingLast4Key:  identitycrypto.Last4(idNumber),
+		session.PendingNameKey:   pending.NameMasked,
+		session.PendingIDHashKey: pending.IDHash,
+		session.PendingLast4Key:  pending.IDLast4,
 	}); err != nil {
 		s.recordFailure()
 		writeError(w, http.StatusInternalServerError, "failed to save verification session")
 		return
 	}
+	s.storePendingKYC(pending)
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"redirect_url": certifyURL,
 		"certify_url":  certifyURL,
 		"certify_id":   initResp.CertifyID,
 		"state":        state,
+		"expires_at":   pending.ExpiresAt.Format(time.RFC3339),
 	})
 }
 
@@ -337,47 +400,60 @@ func (s *Server) confirmKYC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "no pending verification")
 		return
 	}
+	pending, ok := s.pendingKYC(expectedState)
+	if !ok {
+		if terminal, ok := s.terminalKYC(expectedState); ok {
+			if err := s.clearPendingKYC(r, w); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to clear verification session")
+				return
+			}
+			if terminal.Expired {
+				writeError(w, http.StatusGone, "verification has expired")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"verified": true,
+				"kyc":      terminal.Attribute,
+			})
+			return
+		}
+		if err := s.clearPendingKYC(r, w); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to clear verification session")
+			return
+		}
+		writeError(w, http.StatusGone, "verification has expired")
+		return
+	}
+	if pending.UserID != userID || pending.CertifyID != certifyID {
+		writeError(w, http.StatusBadRequest, "invalid verification state")
+		return
+	}
 
-	queryResp, err := s.alipay.Query(r.Context(), certifyID)
+	result, err := s.settlePendingKYC(r.Context(), pending)
 	if err != nil {
-		s.settleFailure(r, w)
-		s.logger.Warn("alipay query failed", "user_id", userID, "certify_id", certifyID, "error", err)
+		s.logger.Warn("failed to settle verification", "user_id", userID, "certify_id", certifyID, "error", err)
 		writeError(w, http.StatusBadGateway, "failed to confirm alipay verification")
 		return
 	}
-	if strings.ToUpper(queryResp.Passed) != "T" {
+	if result.Expired {
+		if err := s.clearPendingKYC(r, w); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to clear verification session")
+			return
+		}
+		writeError(w, http.StatusGone, "verification has expired")
+		return
+	}
+	if !result.Passed {
 		writeError(w, http.StatusConflict, "alipay verification has not passed")
 		return
 	}
-
-	attr := authentik.KYCAttribute{
-		Verified:   true,
-		VerifiedAt: time.Now().UTC().Format(time.RFC3339),
-		Channel:    "alipay",
-		IDHash:     stringValue(sess.Values[session.PendingIDHashKey]),
-		IDLast4:    stringValue(sess.Values[session.PendingLast4Key]),
-		NameMasked: stringValue(sess.Values[session.PendingNameKey]),
-	}
-	if attr.IDHash == "" || attr.IDLast4 == "" || attr.NameMasked == "" {
-		s.settleFailure(r, w)
-		writeError(w, http.StatusBadRequest, "pending verification data is missing")
-		return
-	}
-	if err := s.authentik.MarkVerified(r.Context(), userID, attr); err != nil {
-		s.settleFailure(r, w)
-		s.logger.Warn("authentik update failed", "user_id", userID, "error", err)
-		writeError(w, http.StatusBadGateway, "failed to write verification to authentik")
-		return
-	}
 	if err := s.clearPendingKYC(r, w); err != nil {
-		s.settleFailure(r, w)
 		writeError(w, http.StatusInternalServerError, "failed to clear verification session")
 		return
 	}
-	s.recordSuccess()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"verified": true,
-		"kyc":      attr,
+		"kyc":      result.Attribute,
 	})
 }
 
@@ -499,10 +575,119 @@ func (s *Server) recordFailure() {
 	}
 }
 
-func (s *Server) settleFailure(r *http.Request, w http.ResponseWriter) {
-	s.recordFailure()
-	if err := s.clearPendingKYC(r, w); err != nil {
-		s.logger.Warn("failed to clear failed verification session", "error", err)
+func (s *Server) storePendingKYC(pending pendingKYC) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	s.pending[pending.State] = pending
+	delete(s.terminal, pending.State)
+}
+
+func (s *Server) pendingKYC(state string) (pendingKYC, bool) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	pending, ok := s.pending[state]
+	return pending, ok
+}
+
+func (s *Server) terminalKYC(state string) (terminalKYC, bool) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	terminal, ok := s.terminal[state]
+	if !ok {
+		return terminalKYC{}, false
+	}
+	if time.Now().UTC().After(terminal.ExpiresAt) {
+		delete(s.terminal, state)
+		return terminalKYC{}, false
+	}
+	return terminal, true
+}
+
+func (s *Server) finishPendingKYC(state string, terminal terminalKYC) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	delete(s.pending, state)
+	terminal.ExpiresAt = time.Now().UTC().Add(s.cfg.KYCTimeout)
+	s.terminal[state] = terminal
+}
+
+func (s *Server) pendingKYCSnapshot() []pendingKYC {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	now := time.Now().UTC()
+	items := make([]pendingKYC, 0, len(s.pending))
+	for _, pending := range s.pending {
+		items = append(items, pending)
+	}
+	for state, terminal := range s.terminal {
+		if now.After(terminal.ExpiresAt) {
+			delete(s.terminal, state)
+		}
+	}
+	return items
+}
+
+func (s *Server) settlePendingKYC(ctx context.Context, pending pendingKYC) (settleKYCResult, error) {
+	s.settleMu.Lock()
+	defer s.settleMu.Unlock()
+
+	current, ok := s.pendingKYC(pending.State)
+	if !ok {
+		if terminal, ok := s.terminalKYC(pending.State); ok {
+			if terminal.Expired {
+				return settleKYCResult{Expired: true}, nil
+			}
+			return settleKYCResult{Passed: true, Attribute: terminal.Attribute}, nil
+		}
+		return settleKYCResult{Expired: true}, nil
+	}
+	pending = current
+
+	if time.Now().UTC().After(pending.ExpiresAt) {
+		s.finishPendingKYC(pending.State, terminalKYC{Expired: true})
+		s.recordFailure()
+		return settleKYCResult{Expired: true}, nil
+	}
+	queryResp, err := s.alipay.Query(ctx, pending.CertifyID)
+	if err != nil {
+		return settleKYCResult{}, err
+	}
+	if strings.ToUpper(queryResp.Passed) != "T" {
+		return settleKYCResult{Passed: false}, nil
+	}
+	attr := authentik.KYCAttribute{
+		Verified:   true,
+		VerifiedAt: time.Now().UTC().Format(time.RFC3339),
+		Channel:    "alipay",
+		IDHash:     pending.IDHash,
+		IDLast4:    pending.IDLast4,
+		NameMasked: pending.NameMasked,
+	}
+	if attr.IDHash == "" || attr.IDLast4 == "" || attr.NameMasked == "" {
+		return settleKYCResult{}, errors.New("pending verification data is missing")
+	}
+	if err := s.authentik.MarkVerified(ctx, pending.UserID, attr); err != nil {
+		return settleKYCResult{}, err
+	}
+	s.finishPendingKYC(pending.State, terminalKYC{Attribute: attr})
+	s.recordSuccess()
+	return settleKYCResult{Passed: true, Attribute: attr}, nil
+}
+
+func (s *Server) checkPendingKYC(ctx context.Context) {
+	for _, pending := range s.pendingKYCSnapshot() {
+		result, err := s.settlePendingKYC(ctx, pending)
+		if err != nil {
+			s.logger.Warn("failed to poll pending verification", "user_id", pending.UserID, "certify_id", pending.CertifyID, "error", err)
+			continue
+		}
+		if result.Expired {
+			s.logger.Info("pending verification expired", "user_id", pending.UserID, "certify_id", pending.CertifyID)
+			continue
+		}
+		if result.Passed {
+			s.logger.Info("pending verification completed", "user_id", pending.UserID, "certify_id", pending.CertifyID)
+		}
 	}
 }
 

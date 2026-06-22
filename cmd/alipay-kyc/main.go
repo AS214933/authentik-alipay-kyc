@@ -61,6 +61,8 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	go app.StartKYCWorker(ctx)
+
 	go func() {
 		logger.Info("listening", "addr", cfg.HTTPAddr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

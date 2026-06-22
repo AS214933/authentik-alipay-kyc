@@ -14,6 +14,8 @@ The ID number is not stored. The service keeps only an HMAC-SHA256 hash, ID last
 
 Verification counters are stored in a local JSON file and are not shown in the frontend. They can be read through an authenticated API.
 
+Alipay verification stays pending for 30 minutes by default. Users can retry result checks from the browser, and the server also polls pending Alipay certifications on a one-minute interval.
+
 ## authentik Setup
 
 Create an OAuth2/OpenID Provider and an Application named `实名认证`.
@@ -72,6 +74,8 @@ Configure the Alipay application for identity verification and set the return UR
 | `HASH_PEPPER` | yes | empty | Secret HMAC key for ID hashes. |
 | `STATS_FILE` | no | `/data/stats.json` | Local JSON file storing total, success, and failure counters. |
 | `STATS_API_TOKEN` | yes | empty | Bearer token required for `GET /api/stats`. |
+| `KYC_TIMEOUT_SECONDS` | no | `1800` | Pending Alipay verification timeout. Defaults to 30 minutes. |
+| `KYC_POLL_INTERVAL_SECONDS` | no | `60` | Server-side polling interval for pending Alipay verification. |
 | `OIDC_ISSUER` | yes | empty | authentik provider issuer URL. Use the exact issuer from authentik discovery, usually ending with `/`, for example `https://auth.example.com/application/o/alipay-kyc/`. |
 | `OIDC_CLIENT_ID` | yes | empty | OIDC client ID. |
 | `OIDC_CLIENT_SECRET` | yes | empty | OIDC client secret. |

@@ -233,7 +233,14 @@ async function confirmKyc(stateValue) {
     state.pendingState = ''
     window.history.replaceState({}, '', '/')
   } catch (err) {
-    state.error = err.status === 409 ? '支付宝还没有返回认证通过结果，请完成扫脸后再检查。' : err.message
+    if (err.status === 409) {
+      state.error = '支付宝还没有返回认证通过结果，请完成扫脸后再检查。'
+    } else if (err.status === 410) {
+      resetKyc()
+      state.error = '本次认证已超时，请重新开始认证。'
+    } else {
+      state.error = err.message
+    }
   } finally {
     state.confirming = false
   }
