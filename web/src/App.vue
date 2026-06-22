@@ -30,7 +30,7 @@
           <div class="account-row">
             <div>
               <span class="label">当前用户</span>
-              <strong>{{ state.user.display_name || state.user.username || state.user.id }}</strong>
+              <strong>{{ state.user.username || state.user.display_name || state.user.id }}</strong>
             </div>
             <span class="status" :class="{ verified: state.verified }">
               <CircleCheck v-if="state.verified" :size="16" />
