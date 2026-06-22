@@ -622,6 +622,139 @@ func TestStatsAPIRequiresBearerToken(t *testing.T) {
 	}
 }
 
+func TestAdminImportRequiresLogin(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.Password = "admin-secret"
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"张三","id_number":"11010519491231002X","verified":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("admin import status = %d, want %d body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+	}
+}
+
+func TestAdminImportWritesPIIAndAuthentikWithoutStats(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.Password = "admin-secret"
+	ak := &fakeAuthentik{user: authentik.User{
+		ID:         5,
+		Username:   "bob",
+		Attributes: map[string]interface{}{},
+	}}
+	piiStore := &fakePIIStore{}
+	statsStore := testStats(t)
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: ak,
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     statsStore,
+		PII:       piiStore,
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+
+	cookies := adminCookies(t, handler, "admin-secret")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"李四","id_number":"440524188001010014","verified":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin import status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var importResp struct {
+		UserID string `json:"user_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &importResp); err != nil {
+		t.Fatal(err)
+	}
+	if importResp.UserID != "5" {
+		t.Fatalf("admin import user_id = %q, want 5", importResp.UserID)
+	}
+	if !ak.attr.Verified || ak.attr.Channel != "admin" || ak.attr.NameMasked != "*四" || ak.attr.IDLast4 != "0014" || ak.attr.IDHash == "" || ak.attr.VerifiedAt == "" {
+		t.Fatalf("unexpected admin authentik attr: %+v", ak.attr)
+	}
+	if len(piiStore.entries) != 1 {
+		t.Fatalf("pii entries = %d, want 1", len(piiStore.entries))
+	}
+	if piiStore.entries[0].UserID != "5" || piiStore.entries[0].Name != "李四" || piiStore.entries[0].IDNumber != "440524188001010014" {
+		t.Fatalf("unexpected pii entry: %+v", piiStore.entries[0])
+	}
+	if piiStore.entries[0].IDHash != ak.attr.IDHash {
+		t.Fatalf("pii id hash = %q, authentik id hash = %q", piiStore.entries[0].IDHash, ak.attr.IDHash)
+	}
+	counters, err := statsStore.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counters.Total != 0 || counters.Success != 0 || counters.Failure != 0 {
+		t.Fatalf("manual import changed stats: %+v", counters)
+	}
+}
+
+func TestAdminImportCanWriteUnverifiedAttribute(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.Password = "admin-secret"
+	ak := &fakeAuthentik{user: authentik.User{
+		ID:         5,
+		Username:   "bob",
+		Attributes: map[string]interface{}{},
+	}}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: ak,
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+
+	cookies := adminCookies(t, handler, "admin-secret")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"李四","id_number":"440524188001010014","verified":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin import status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if ak.attr.Verified || ak.attr.VerifiedAt != "" || ak.attr.Channel != "admin" {
+		t.Fatalf("unexpected unverified admin attr: %+v", ak.attr)
+	}
+}
+
 func userCookie(t *testing.T, srv *Server) []*http.Cookie {
 	t.Helper()
 	rec := httptest.NewRecorder()
@@ -632,6 +765,18 @@ func userCookie(t *testing.T, srv *Server) []*http.Cookie {
 		"display_name": "Alice",
 	}); err != nil {
 		t.Fatal(err)
+	}
+	return rec.Result().Cookies()
+}
+
+func adminCookies(t *testing.T, handler http.Handler, password string) []*http.Cookie {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/login", strings.NewReader(`{"password":"`+password+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin login status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	return rec.Result().Cookies()
 }

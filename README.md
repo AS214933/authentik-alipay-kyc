@@ -78,8 +78,10 @@ Configure the Alipay application for identity verification and set the return UR
 | `STATS_API_TOKEN` | yes | empty | Bearer token required for `GET /api/stats`. |
 | `KYC_PII_DIR` | no | `/data/kyc_pii` | Local directory for encrypted submitted name and ID number records. Each file is named `<id_hash>`. |
 | `PII_ENCRYPTION_PUBLIC_KEY_TYPE` | no | `rsa` | Public key type for local PII encryption. Supported values: `rsa`, `sm2`. |
-| `PII_ENCRYPTION_PUBLIC_KEY` | yes | empty | PEM public key used to encrypt local PII records. RSA uses RSA-OAEP-SHA256; SM2 uses ASN.1 SM2 ciphertext. |
-| `PII_ENCRYPTION_PUBLIC_KEY_FILE` | no | empty | Path to a PEM public key file. Use this instead of `PII_ENCRYPTION_PUBLIC_KEY` when mounting the key into Docker. |
+| `PII_ENCRYPTION_PUBLIC_KEY` | one of key or file | empty | PEM public key used to encrypt local PII records. RSA uses RSA-OAEP-SHA256; SM2 uses ASN.1 SM2 ciphertext. |
+| `PII_ENCRYPTION_PUBLIC_KEY_FILE` | one of key or file | empty | Path to a PEM public key file. Use this instead of `PII_ENCRYPTION_PUBLIC_KEY` when mounting the key into Docker. |
+| `ADMIN_ENABLED` | no | `false` | Enable the password-protected manual import page at `/admin/`. |
+| `ADMIN_PASSWORD` | when admin enabled | empty | Password for `/admin/` manual import. |
 | `KYC_TIMEOUT_SECONDS` | no | `1800` | Pending Alipay verification timeout. Defaults to 30 minutes. |
 | `KYC_POLL_INTERVAL_SECONDS` | no | `60` | Server-side polling interval for pending Alipay verification. |
 | `OIDC_ISSUER` | yes | empty | authentik provider issuer URL. Use the exact issuer from authentik discovery, usually ending with `/`, for example `https://auth.example.com/application/o/alipay-kyc/`. |
@@ -126,6 +128,10 @@ openssl rsa -in pii-private.pem -pubout -out pii-public.pem
 Mount `pii-public.pem` into the container and set `PII_ENCRYPTION_PUBLIC_KEY_FILE=/pii-public.pem`, or set `PII_ENCRYPTION_PUBLIC_KEY` to the public key PEM text. Keep `pii-private.pem` outside the service host unless you need offline decryption.
 
 For SM2 public keys, set `PII_ENCRYPTION_PUBLIC_KEY_TYPE=sm2` and provide the SM2 public key as a PEM `PUBLIC KEY`.
+
+Manual admin import:
+
+Set `ADMIN_ENABLED=true` and `ADMIN_PASSWORD` to enable `/admin/`. The admin page can import a user by authentik user ID, name, ID number, and a verified yes/no switch. Manual imports write the same local encrypted PII record and authentik attribute shape as the Alipay flow, using `channel: "admin"`, but do not increment the Alipay verification counters.
 
 Stats API:
 

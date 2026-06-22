@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -100,6 +101,18 @@ type settleKYCResult struct {
 	Attribute authentik.KYCAttribute
 }
 
+type verifiedIdentity struct {
+	UserID       string
+	Username     string
+	State        string
+	CertifyID    string
+	OuterOrderNo string
+	Name         string
+	IDNumber     string
+	Channel      string
+	Verified     bool
+}
+
 type terminalKYC struct {
 	Expired   bool
 	Attribute authentik.KYCAttribute
@@ -158,6 +171,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /auth/logout", s.logout)
 	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("GET /api/stats", s.statsSnapshot)
+	mux.HandleFunc("GET /api/admin/status", s.adminStatus)
+	mux.HandleFunc("POST /api/admin/login", s.adminLogin)
+	mux.HandleFunc("POST /api/admin/logout", s.adminLogout)
+	mux.HandleFunc("POST /api/admin/import", s.adminImport)
 	mux.HandleFunc("POST /api/kyc/start", s.startKYC)
 	mux.HandleFunc("POST /api/kyc/confirm", s.confirmKYC)
 	mux.HandleFunc("POST /api/alipay/notify", s.alipayNotify)
@@ -268,7 +285,7 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 	}
 	if attr, ok := akUser.Attributes[s.cfg.Authentik.AttributeKey]; ok {
 		response["kyc"] = attr
-		response["verified"] = true
+		response["verified"] = kycAttributeVerified(attr)
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -290,6 +307,114 @@ func (s *Server) statsSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, counters)
+}
+
+func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"enabled":       s.cfg.Admin.Enabled,
+		"authenticated": s.adminAuthenticated(r),
+	})
+}
+
+func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.Admin.Enabled {
+		writeError(w, http.StatusNotFound, "admin import is disabled")
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if !s.compareAdminPassword(req.Password) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if err := s.sessions.Save(r, w, map[interface{}]interface{}{
+		session.AdminKey: "true",
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save admin session")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
+}
+
+func (s *Server) adminLogout(w http.ResponseWriter, r *http.Request) {
+	if err := s.sessions.Save(r, w, map[interface{}]interface{}{
+		session.AdminKey: nil,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to clear admin session")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": false})
+}
+
+func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.Admin.Enabled {
+		writeError(w, http.StatusNotFound, "admin import is disabled")
+		return
+	}
+	if !s.adminAuthenticated(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var req struct {
+		UserID   string `json:"user_id"`
+		Name     string `json:"name"`
+		IDNumber string `json:"id_number"`
+		Verified *bool  `json:"verified"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	userID := strings.TrimSpace(req.UserID)
+	name := strings.TrimSpace(req.Name)
+	idNumber := identitycrypto.NormalizeIDNumber(req.IDNumber)
+	if userID == "" {
+		writeError(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+	if name == "" || len([]rune(name)) > 64 {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if len(idNumber) != 15 && len(idNumber) != 18 {
+		writeError(w, http.StatusBadRequest, "id_number must be a 15 or 18 character identity card number")
+		return
+	}
+	verified := true
+	if req.Verified != nil {
+		verified = *req.Verified
+	}
+	importToken, err := oidc.RandomToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create import record id")
+		return
+	}
+	importID := "admin-" + importToken[:16]
+	attr, err := s.recordVerifiedIdentity(r.Context(), verifiedIdentity{
+		UserID:       userID,
+		State:        importID,
+		CertifyID:    importID,
+		OuterOrderNo: importID,
+		Name:         name,
+		IDNumber:     idNumber,
+		Channel:      "admin",
+		Verified:     verified,
+	})
+	if err != nil {
+		s.logger.Warn("failed to import admin verification", "user_id", userID, "error", err)
+		writeError(w, http.StatusBadGateway, "failed to import verification")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"imported": true,
+		"user_id":  userID,
+		"kyc":      attr,
+	})
 }
 
 func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
@@ -578,12 +703,83 @@ func (s *Server) currentUserID(r *http.Request) (string, bool) {
 	return userID, userID != ""
 }
 
+func (s *Server) adminAuthenticated(r *http.Request) bool {
+	if !s.cfg.Admin.Enabled {
+		return false
+	}
+	sess, err := s.sessions.Get(r)
+	if err != nil {
+		return false
+	}
+	value, _ := sess.Values[session.AdminKey].(string)
+	return value == "true"
+}
+
+func (s *Server) compareAdminPassword(password string) bool {
+	if s.cfg.Admin.Password == "" {
+		return false
+	}
+	got := sha256.Sum256([]byte(password))
+	want := sha256.Sum256([]byte(s.cfg.Admin.Password))
+	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
+}
+
 func (s *Server) authorizeStatsAPI(r *http.Request) bool {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if token == "" || s.cfg.StatsAPIToken == "" {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.StatsAPIToken)) == 1
+}
+
+func (s *Server) recordVerifiedIdentity(ctx context.Context, identity verifiedIdentity) (authentik.KYCAttribute, error) {
+	identity.UserID = strings.TrimSpace(identity.UserID)
+	identity.Username = strings.TrimSpace(identity.Username)
+	identity.Name = strings.TrimSpace(identity.Name)
+	identity.IDNumber = identitycrypto.NormalizeIDNumber(identity.IDNumber)
+	identity.Channel = strings.TrimSpace(identity.Channel)
+	if identity.UserID == "" || identity.Name == "" || identity.IDNumber == "" || identity.Channel == "" {
+		return authentik.KYCAttribute{}, errors.New("verified identity is missing required fields")
+	}
+	idHash := identitycrypto.IDHash(identity.IDNumber, s.cfg.HashPepper)
+	if s.pii != nil {
+		if err := s.pii.Append(piistore.Entry{
+			UserID:       identity.UserID,
+			Username:     identity.Username,
+			State:        firstNonEmpty(identity.State, identity.Channel),
+			CertifyID:    firstNonEmpty(identity.CertifyID, identity.Channel),
+			OuterOrderNo: firstNonEmpty(identity.OuterOrderNo, identity.Channel),
+			IDHash:       idHash,
+			Name:         identity.Name,
+			IDNumber:     identity.IDNumber,
+		}); err != nil {
+			return authentik.KYCAttribute{}, err
+		}
+	}
+	attr := authentik.KYCAttribute{
+		Verified:   identity.Verified,
+		Channel:    identity.Channel,
+		IDHash:     idHash,
+		IDLast4:    identitycrypto.Last4(identity.IDNumber),
+		NameMasked: identitycrypto.MaskChineseName(identity.Name),
+	}
+	if identity.Verified {
+		attr.VerifiedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	return s.markKYCAttribute(ctx, identity.UserID, attr)
+}
+
+func (s *Server) markKYCAttribute(ctx context.Context, userID string, attr authentik.KYCAttribute) (authentik.KYCAttribute, error) {
+	if attr.IDHash == "" || attr.IDLast4 == "" || attr.NameMasked == "" || attr.Channel == "" {
+		return authentik.KYCAttribute{}, errors.New("verification data is missing")
+	}
+	if attr.Verified && attr.VerifiedAt == "" {
+		attr.VerifiedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	if err := s.authentik.MarkVerified(ctx, userID, attr); err != nil {
+		return authentik.KYCAttribute{}, err
+	}
+	return attr, nil
 }
 
 func (s *Server) recordTotal() {
@@ -719,18 +915,15 @@ func (s *Server) settlePendingKYC(ctx context.Context, pending pendingKYC) (sett
 	if strings.ToUpper(queryResp.Passed) != "T" {
 		return settleKYCResult{Passed: false}, nil
 	}
-	attr := authentik.KYCAttribute{
+	attr, err := s.markKYCAttribute(ctx, pending.UserID, authentik.KYCAttribute{
 		Verified:   true,
 		VerifiedAt: time.Now().UTC().Format(time.RFC3339),
 		Channel:    "alipay",
 		IDHash:     pending.IDHash,
 		IDLast4:    pending.IDLast4,
 		NameMasked: pending.NameMasked,
-	}
-	if attr.IDHash == "" || attr.IDLast4 == "" || attr.NameMasked == "" {
-		return settleKYCResult{}, errors.New("pending verification data is missing")
-	}
-	if err := s.authentik.MarkVerified(ctx, pending.UserID, attr); err != nil {
+	})
+	if err != nil {
 		return settleKYCResult{}, err
 	}
 	s.finishPendingKYC(pending.State, terminalKYC{Attribute: attr})
@@ -837,6 +1030,22 @@ func addQuery(rawURL, key, value string) string {
 func stringValue(value interface{}) string {
 	typed, _ := value.(string)
 	return typed
+}
+
+func boolValue(value interface{}) bool {
+	typed, _ := value.(bool)
+	return typed
+}
+
+func kycAttributeVerified(value interface{}) bool {
+	switch typed := value.(type) {
+	case authentik.KYCAttribute:
+		return typed.Verified
+	case map[string]interface{}:
+		return boolValue(typed["verified"])
+	default:
+		return false
+	}
 }
 
 func firstNonEmpty(values ...string) string {

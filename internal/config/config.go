@@ -28,6 +28,7 @@ type Config struct {
 	OIDC             OIDCConfig
 	Authentik        AuthentikConfig
 	Alipay           AlipayConfig
+	Admin            AdminConfig
 	Session          SessionConfig
 }
 
@@ -61,6 +62,11 @@ type AlipayConfig struct {
 	CallbackURL        string
 	ReturnURL          string
 	Timeout            time.Duration
+}
+
+type AdminConfig struct {
+	Enabled  bool
+	Password string
 }
 
 type SessionConfig struct {
@@ -133,6 +139,10 @@ func Load() (Config, error) {
 			ReturnURL:          returnURL,
 			Timeout:            secondsEnv("ALIPAY_TIMEOUT_SECONDS", 15),
 		},
+		Admin: AdminConfig{
+			Enabled:  boolEnv("ADMIN_ENABLED", false),
+			Password: getenv("ADMIN_PASSWORD", ""),
+		},
 		Session: SessionConfig{
 			Name:     getenv("SESSION_NAME", "alipay_kyc"),
 			KeyPairs: sessionKeys,
@@ -161,6 +171,9 @@ func Load() (Config, error) {
 	}
 	if cfg.Alipay.AppID == "" || cfg.Alipay.AppPrivateKeyPEM == "" || cfg.Alipay.AlipayPublicKeyPEM == "" {
 		return Config{}, errors.New("ALIPAY_APP_ID, ALIPAY_APP_PRIVATE_KEY, and ALIPAY_PUBLIC_KEY are required")
+	}
+	if cfg.Admin.Enabled && cfg.Admin.Password == "" {
+		return Config{}, errors.New("ADMIN_PASSWORD is required when ADMIN_ENABLED is true")
 	}
 	return cfg, nil
 }

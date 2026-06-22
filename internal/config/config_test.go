@@ -53,6 +53,30 @@ func TestLoadRejectsBothPIIPublicKeyEnvForms(t *testing.T) {
 	}
 }
 
+func TestLoadRequiresAdminPasswordWhenEnabled(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ADMIN_ENABLED", "true")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "ADMIN_PASSWORD is required") {
+		t.Fatalf("Load error = %v, want admin password required", err)
+	}
+}
+
+func TestLoadAcceptsAdminPasswordWhenEnabled(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ADMIN_ENABLED", "true")
+	t.Setenv("ADMIN_PASSWORD", "secret")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Admin.Enabled || cfg.Admin.Password != "secret" {
+		t.Fatalf("unexpected admin config: %+v", cfg.Admin)
+	}
+}
+
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("PUBLIC_URL", "https://kyc.example.com")
