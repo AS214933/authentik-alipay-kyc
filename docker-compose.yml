@@ -1,7 +1,7 @@
 services:
   alipay-kyc:
     build: .
-    image: ghcr.io/OWNER/REPOSITORY:latest
+    image: ghcr.io/as214933/authentik-alipay-kyc:latest
     ports:
       - "8080:8080"
     environment:
