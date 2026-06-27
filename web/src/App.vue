@@ -160,14 +160,14 @@
                 {{ providerSwitchPrefix }}
                 <button type="button" @click="switchProvider">{{ providerSwitchText }}</button>
               </p>
-              <div v-if="launchButtonUrl && state.mobile" class="mobile-launch">
+              <div class="qr-frame">
+                <img :src="state.qrCode" :alt="qrAltText" />
+              </div>
+              <div v-if="launchButtonUrl" class="direct-launch">
                 <button class="primary" type="button" @click="openLaunchUrl">
                   <ExternalLink :size="18" />
                   {{ launchButtonText }}
                 </button>
-              </div>
-              <div class="qr-frame">
-                <img :src="state.qrCode" :alt="qrAltText" />
               </div>
               <div v-if="state.qrNoticeHtml" class="qr-notice" v-html="state.qrNoticeHtml"></div>
               <div class="qr-actions">

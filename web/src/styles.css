@@ -222,7 +222,7 @@ h2 {
   gap: 18px;
 }
 
-.mobile-launch {
+.direct-launch {
   width: min(100%, 320px);
 }
 
