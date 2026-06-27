@@ -23,6 +23,7 @@ const (
 	PendingNameKey    = "pending_name"
 	PendingIDHashKey  = "pending_id_hash"
 	PendingLast4Key   = "pending_last4"
+	AdminCSRFKey      = "admin_csrf"
 )
 
 type Store struct {
