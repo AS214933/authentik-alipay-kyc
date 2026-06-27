@@ -29,6 +29,7 @@ type Config struct {
 	OIDC             OIDCConfig
 	Authentik        AuthentikConfig
 	Alipay           AlipayConfig
+	Aliyun           AliyunConfig
 	Admin            AdminConfig
 	Session          SessionConfig
 }
@@ -65,6 +66,19 @@ type AlipayConfig struct {
 	Timeout            time.Duration
 }
 
+type AliyunConfig struct {
+	Enabled         bool
+	AccessKeyID     string
+	AccessKeySecret string
+	SceneID         int64
+	Endpoints       []string
+	ProductCode     string
+	Model           string
+	CertType        string
+	ReturnURL       string
+	Timeout         time.Duration
+}
+
 type AdminConfig struct {
 	Enabled  bool
 	Password string
@@ -94,6 +108,7 @@ func Load() (Config, error) {
 	redirectURL := getenv("OIDC_REDIRECT_URL", publicURL+"/auth/callback")
 	callbackURL := getenv("ALIPAY_CALLBACK_URL", publicURL+"/api/alipay/notify")
 	returnURL := getenv("ALIPAY_RETURN_URL", publicURL+"/verify/callback")
+	aliyunReturnURL := getenv("ALIYUN_RETURN_URL", publicURL+"/verify/callback")
 	piiPublicKeyPEM, err := loadPEMEnv("PII_ENCRYPTION_PUBLIC_KEY", "PII_ENCRYPTION_PUBLIC_KEY_FILE")
 	if err != nil {
 		return Config{}, err
@@ -110,7 +125,7 @@ func Load() (Config, error) {
 		PIIPublicKeyType: strings.ToLower(getenv("PII_ENCRYPTION_PUBLIC_KEY_TYPE", "rsa")),
 		PIIPublicKeyPEM:  piiPublicKeyPEM,
 		QRNoticeHTML:     getenv("KYC_QR_NOTICE_HTML", ""),
-		KYCTimeout:       secondsEnv("KYC_TIMEOUT_SECONDS", 1800),
+		KYCTimeout:       secondsEnv("KYC_TIMEOUT_SECONDS", 82800),
 		KYCPollInterval:  secondsEnv("KYC_POLL_INTERVAL_SECONDS", 60),
 		OIDC: OIDCConfig{
 			Issuer:       getenv("OIDC_ISSUER", ""),
@@ -140,6 +155,18 @@ func Load() (Config, error) {
 			CallbackURL:        callbackURL,
 			ReturnURL:          returnURL,
 			Timeout:            secondsEnv("ALIPAY_TIMEOUT_SECONDS", 15),
+		},
+		Aliyun: AliyunConfig{
+			Enabled:         boolEnv("ALIYUN_KYC_ENABLED", false),
+			AccessKeyID:     getenv("ALIYUN_ACCESS_KEY_ID", ""),
+			AccessKeySecret: getenv("ALIYUN_ACCESS_KEY_SECRET", ""),
+			SceneID:         int64Env("ALIYUN_SCENE_ID", 0),
+			Endpoints:       splitCSV(getenv("ALIYUN_ENDPOINTS", "cloudauth.cn-shanghai.aliyuncs.com,cloudauth.cn-beijing.aliyuncs.com")),
+			ProductCode:     getenv("ALIYUN_PRODUCT_CODE", "ID_PRO"),
+			Model:           getenv("ALIYUN_MODEL", "MOVE_ACTION"),
+			CertType:        getenv("ALIYUN_CERT_TYPE", "IDENTITY_CARD"),
+			ReturnURL:       aliyunReturnURL,
+			Timeout:         secondsEnv("ALIYUN_TIMEOUT_SECONDS", 10),
 		},
 		Admin: AdminConfig{
 			Enabled:  boolEnv("ADMIN_ENABLED", false),
@@ -173,6 +200,14 @@ func Load() (Config, error) {
 	}
 	if cfg.Alipay.AppID == "" || cfg.Alipay.AppPrivateKeyPEM == "" || cfg.Alipay.AlipayPublicKeyPEM == "" {
 		return Config{}, errors.New("ALIPAY_APP_ID, ALIPAY_APP_PRIVATE_KEY, and ALIPAY_PUBLIC_KEY are required")
+	}
+	if cfg.Aliyun.Enabled {
+		if cfg.Aliyun.AccessKeyID == "" || cfg.Aliyun.AccessKeySecret == "" || cfg.Aliyun.SceneID <= 0 {
+			return Config{}, errors.New("ALIYUN_ACCESS_KEY_ID, ALIYUN_ACCESS_KEY_SECRET, and ALIYUN_SCENE_ID are required when ALIYUN_KYC_ENABLED is true")
+		}
+		if len(cfg.Aliyun.Endpoints) == 0 {
+			return Config{}, errors.New("ALIYUN_ENDPOINTS must contain at least one endpoint when ALIYUN_KYC_ENABLED is true")
+		}
 	}
 	if cfg.Admin.Enabled && cfg.Admin.Password == "" {
 		return Config{}, errors.New("ADMIN_PASSWORD is required when ADMIN_ENABLED is true")
@@ -225,6 +260,18 @@ func secondsEnv(name string, fallback int) time.Duration {
 		return time.Duration(fallback) * time.Second
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func int64Env(name string, fallback int64) int64 {
+	value := getenv(name, "")
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func boolEnv(name string, fallback bool) bool {

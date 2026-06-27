@@ -187,6 +187,29 @@ h2 {
   gap: 16px;
 }
 
+.provider-switch {
+  margin: 0;
+  color: #637083;
+  font-size: 14px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.provider-switch button {
+  display: inline;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #0f6b56;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.provider-switch button:focus {
+  outline: 3px solid rgba(18, 124, 104, 0.14);
+  outline-offset: 3px;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 180px;

@@ -40,6 +40,7 @@ type Entry struct {
 	UserID       string `json:"user_id"`
 	Username     string `json:"username,omitempty"`
 	State        string `json:"state"`
+	Provider     string `json:"provider,omitempty"`
 	CertifyID    string `json:"certify_id"`
 	OuterOrderNo string `json:"outer_order_no"`
 	IDHash       string `json:"id_hash"`
@@ -53,6 +54,7 @@ type record struct {
 	UserID       string            `json:"user_id"`
 	Username     string            `json:"username,omitempty"`
 	State        string            `json:"state"`
+	Provider     string            `json:"provider,omitempty"`
 	CertifyID    string            `json:"certify_id"`
 	OuterOrderNo string            `json:"outer_order_no"`
 	IDHash       string            `json:"id_hash"`
@@ -150,6 +152,7 @@ func (s *Store) Append(entry Entry) error {
 		UserID:       entry.UserID,
 		Username:     entry.Username,
 		State:        entry.State,
+		Provider:     strings.TrimSpace(entry.Provider),
 		CertifyID:    entry.CertifyID,
 		OuterOrderNo: entry.OuterOrderNo,
 		IDHash:       entry.IDHash,

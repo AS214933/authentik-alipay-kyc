@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
-    "postbuild": "touch internal/server/dist/keep.txt",
+    "postbuild": "node -e \"require('fs').closeSync(require('fs').openSync('internal/server/dist/keep.txt','a'))\"",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {

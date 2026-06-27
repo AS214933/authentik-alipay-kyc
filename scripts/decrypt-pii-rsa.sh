@@ -85,6 +85,7 @@ for index, record in enumerate(records):
         "user_id": record.get("user_id"),
         "username": record.get("username", ""),
         "state": record.get("state"),
+        "provider": record.get("provider", ""),
         "certify_id": record.get("certify_id"),
         "outer_order_no": record.get("outer_order_no"),
         "id_hash": record.get("id_hash"),

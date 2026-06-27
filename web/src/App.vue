@@ -156,14 +156,18 @@
             </div>
 
             <div v-else-if="state.qrCode" class="qr-panel">
-              <div v-if="state.appLaunchUrl && state.mobile" class="mobile-launch">
-                <button class="primary" type="button" @click="openAlipay">
+              <p v-if="canSwitchProvider" class="provider-switch">
+                {{ providerSwitchPrefix }}
+                <button type="button" @click="switchProvider">{{ providerSwitchText }}</button>
+              </p>
+              <div v-if="launchButtonUrl && state.mobile" class="mobile-launch">
+                <button class="primary" type="button" @click="openLaunchUrl">
                   <ExternalLink :size="18" />
-                  打开支付宝
+                  {{ launchButtonText }}
                 </button>
               </div>
               <div class="qr-frame">
-                <img :src="state.qrCode" alt="支付宝实名认证二维码" />
+                <img :src="state.qrCode" :alt="qrAltText" />
               </div>
               <div v-if="state.qrNoticeHtml" class="qr-notice" v-html="state.qrNoticeHtml"></div>
               <div class="qr-actions">
@@ -179,6 +183,10 @@
             </div>
 
             <form v-else class="form" @submit.prevent="startKyc">
+              <p v-if="canSwitchProvider" class="provider-switch">
+                {{ providerSwitchPrefix }}
+                <button type="button" @click="switchProvider">{{ providerSwitchText }}</button>
+              </p>
               <label>
                 <span>姓名</span>
                 <input v-model.trim="form.name" name="name" autocomplete="name" required maxlength="64" />
@@ -242,9 +250,13 @@ const state = reactive({
   verified: false,
   user: {},
   kyc: null,
+  providers: ['alipay'],
+  provider: 'alipay',
+  pendingProvider: '',
   qrCode: '',
   qrNoticeHtml: '',
   appLaunchUrl: '',
+  certifyUrl: '',
   mobile: isMobileBrowser(),
   pendingState: '',
   error: ''
@@ -279,10 +291,28 @@ const adminImportForm = reactive({
 
 const callbackState = ref(new URLSearchParams(window.location.search).get('state') || '')
 const callbackMessage = computed(() => {
-  if (state.confirming) return '正在确认支付宝认证结果'
+  if (state.confirming) return `正在确认${providerDisplayName(state.pendingProvider || state.provider)}认证结果`
   if (state.verified) return '认证已完成并写回 Authentik'
   return '等待认证结果'
 })
+
+const canSwitchProvider = computed(() => state.providers.includes('alipay') && state.providers.includes('aliyun'))
+const providerSwitchPrefix = computed(() =>
+  state.provider === 'aliyun' ? '想使用支付宝？' : '支付宝无法使用？'
+)
+const providerSwitchText = computed(() =>
+  state.provider === 'aliyun' ? '切换回支付宝认证' : '切换到阿里云金融实人认证'
+)
+const launchButtonUrl = computed(() => {
+  if (state.pendingProvider === 'aliyun') return state.certifyUrl
+  return state.appLaunchUrl
+})
+const launchButtonText = computed(() =>
+  state.pendingProvider === 'aliyun' ? '打开阿里云认证' : '打开支付宝'
+)
+const qrAltText = computed(() =>
+  state.pendingProvider === 'aliyun' ? '阿里云金融实人认证二维码' : '支付宝实名认证二维码'
+)
 
 onMounted(async () => {
   if (isAdminPage) {
@@ -325,6 +355,10 @@ async function loadMe() {
     state.verified = Boolean(data.verified)
     state.kyc = data.kyc || null
     state.qrNoticeHtml = data.qr_notice_html || ''
+    state.providers = Array.isArray(data.providers) && data.providers.length ? data.providers : ['alipay']
+    if (!state.providers.includes(state.provider)) {
+      state.provider = state.providers[0] || 'alipay'
+    }
   } catch (err) {
     if (err.status === 401) {
       state.authenticated = false
@@ -429,22 +463,35 @@ async function startKyc() {
   state.busy = true
   state.error = ''
   try {
+    const provider = state.provider
+    const metaInfo = provider === 'aliyun' ? await getAliyunMetaInfo() : ''
+    const certifyUrlType = provider === 'aliyun' && state.mobile ? 'H5' : 'WEB'
     const data = await request('/api/kyc/start', {
       method: 'POST',
-      body: JSON.stringify({ name: form.name, id_number: form.id_number })
+      body: JSON.stringify({
+        name: form.name,
+        id_number: form.id_number,
+        provider,
+        meta_info: metaInfo,
+        certify_url_type: certifyUrlType
+      })
     })
     state.pendingState = data.state || ''
+    state.pendingProvider = data.provider || provider
     state.appLaunchUrl = data.alipay_app_url || ''
+    state.certifyUrl = data.certify_url || data.redirect_url || ''
     state.qrNoticeHtml = data.qr_notice_html || state.qrNoticeHtml || ''
-    const qrUrl = data.certify_url || data.redirect_url
+    const qrUrl = state.certifyUrl
     state.qrCode = await QRCode.toDataURL(qrUrl, {
       errorCorrectionLevel: 'M',
       margin: 1,
       scale: 8
     })
-    openAlipayOnMobile()
+    openLaunchUrlOnMobile()
   } catch (err) {
-    state.error = err.message
+    state.error = state.provider === 'aliyun' && err.message === 'aliyun_meta_failed'
+      ? '无法获取阿里云认证环境信息，请换用其他浏览器或稍后再试'
+      : err.message
   } finally {
     state.busy = false
   }
@@ -463,11 +510,15 @@ async function confirmKyc(stateValue) {
     state.qrCode = ''
     state.qrNoticeHtml = ''
     state.appLaunchUrl = ''
+    state.certifyUrl = ''
     state.pendingState = ''
+    state.pendingProvider = ''
     window.history.replaceState({}, '', '/')
   } catch (err) {
     if (err.status === 409) {
-      state.error = '支付宝还没有返回认证通过结果，请完成扫脸后再检查。'
+      state.error = state.pendingProvider === 'aliyun'
+        ? '阿里云认证尚未返回通过结果，请完成认证后再检查。'
+        : '支付宝还没有返回认证通过结果，请完成扫脸后再检查。'
     } else if (err.status === 410) {
       resetKyc()
       state.error = '本次认证已超时，请重新开始认证。'
@@ -483,24 +534,65 @@ function resetKyc() {
   state.qrCode = ''
   state.qrNoticeHtml = ''
   state.appLaunchUrl = ''
+  state.certifyUrl = ''
   state.pendingState = ''
+  state.pendingProvider = ''
   state.error = ''
 }
 
-function openAlipay() {
-  if (state.appLaunchUrl) {
-    window.location.href = state.appLaunchUrl
+function openLaunchUrl() {
+  if (launchButtonUrl.value) {
+    window.location.href = launchButtonUrl.value
   }
 }
 
-function openAlipayOnMobile() {
-  if (state.appLaunchUrl && state.mobile) {
-    window.setTimeout(openAlipay, 120)
+function openLaunchUrlOnMobile() {
+  if (launchButtonUrl.value && state.mobile) {
+    window.setTimeout(openLaunchUrl, 120)
   }
+}
+
+function switchProvider() {
+  state.provider = state.provider === 'aliyun' ? 'alipay' : 'aliyun'
+  resetKyc()
+}
+
+async function getAliyunMetaInfo() {
+  await loadAliyunMetaScript()
+  if (typeof window.getMetaInfo !== 'function') {
+    throw new Error('aliyun_meta_failed')
+  }
+  const metaInfo = window.getMetaInfo()
+  if (!metaInfo) {
+    throw new Error('aliyun_meta_failed')
+  }
+  return typeof metaInfo === 'string' ? metaInfo : JSON.stringify(metaInfo)
+}
+
+function loadAliyunMetaScript() {
+  if (typeof window.getMetaInfo === 'function') {
+    return Promise.resolve()
+  }
+  if (window.__aliyunMetaScriptPromise) {
+    return window.__aliyunMetaScriptPromise
+  }
+  window.__aliyunMetaScriptPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script')
+    script.src = 'https://o.alicdn.com/yd-cloudauth/cloudauth-cdn/jsvm_all.js'
+    script.async = true
+    script.onload = resolve
+    script.onerror = () => reject(new Error('aliyun_meta_failed'))
+    document.head.appendChild(script)
+  })
+  return window.__aliyunMetaScriptPromise
 }
 
 function isMobileBrowser() {
   return /Android|iPhone|iPad|iPod|Mobile/i.test(window.navigator.userAgent)
+}
+
+function providerDisplayName(provider) {
+  return provider === 'aliyun' ? '阿里云' : '支付宝'
 }
 
 function formatDate(value) {

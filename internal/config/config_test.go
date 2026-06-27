@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadPreservesOIDCIssuerTrailingSlash(t *testing.T) {
@@ -99,6 +100,47 @@ func TestLoadDefaultsQRNoticeHTMLToEmpty(t *testing.T) {
 	}
 	if cfg.QRNoticeHTML != "" {
 		t.Fatalf("QRNoticeHTML = %q, want empty", cfg.QRNoticeHTML)
+	}
+}
+
+func TestLoadDefaultsAlipayKYCTimeoutTo23Hours(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KYCTimeout != 23*time.Hour {
+		t.Fatalf("KYCTimeout = %s, want 23h", cfg.KYCTimeout)
+	}
+}
+
+func TestLoadRequiresAliyunConfigWhenEnabled(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ALIYUN_KYC_ENABLED", "true")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "ALIYUN_ACCESS_KEY_ID") {
+		t.Fatalf("Load error = %v, want aliyun config required", err)
+	}
+}
+
+func TestLoadAcceptsAliyunConfigWhenEnabled(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ALIYUN_KYC_ENABLED", "true")
+	t.Setenv("ALIYUN_ACCESS_KEY_ID", "ak")
+	t.Setenv("ALIYUN_ACCESS_KEY_SECRET", "secret")
+	t.Setenv("ALIYUN_SCENE_ID", "1000000006")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Aliyun.Enabled || cfg.Aliyun.SceneID != 1000000006 || cfg.Aliyun.ProductCode != "ID_PRO" || cfg.Aliyun.Model != "MOVE_ACTION" {
+		t.Fatalf("unexpected aliyun config: %+v", cfg.Aliyun)
+	}
+	if len(cfg.Aliyun.Endpoints) != 2 || cfg.Aliyun.Endpoints[0] != "cloudauth.cn-shanghai.aliyuncs.com" || cfg.Aliyun.Endpoints[1] != "cloudauth.cn-beijing.aliyuncs.com" {
+		t.Fatalf("unexpected aliyun endpoints: %+v", cfg.Aliyun.Endpoints)
 	}
 }
 

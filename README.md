@@ -67,6 +67,18 @@ The service uses Alipay OpenAPI methods:
 
 Configure the Alipay application for identity verification and set the return URL to `https://<kyc-service>/verify/callback`. The service also sends a notify URL at `https://<kyc-service>/api/alipay/notify`, but the browser return path performs the authoritative query and authentik write-back.
 
+## Aliyun ID Verification Setup
+
+Aliyun Financial-grade ID Verification can be enabled as a manual fallback channel. The frontend obtains `MetaInfo` from the Aliyun Web/H5 script for every start request, the server calls `InitFaceVerify`, and result confirmation uses `DescribeFaceVerify` with `ResultObject.Passed == "T"`.
+
+Enable it with `ALIYUN_KYC_ENABLED=true`, configure an AccessKey with permission to call CloudAuth APIs, and set `ALIYUN_SCENE_ID` to your financial-grade real-person verification scene ID. The default endpoints try Shanghai first and Beijing second:
+
+```text
+cloudauth.cn-shanghai.aliyuncs.com,cloudauth.cn-beijing.aliyuncs.com
+```
+
+Aliyun `CertifyId` and `CertifyUrl` are valid for 30 minutes and can only be submitted once. Alipay pending verification defaults to 23 hours.
+
 ## Configuration
 
 | Variable | Required | Default | Description |
@@ -85,7 +97,7 @@ Configure the Alipay application for identity verification and set the return UR
 | `PII_ENCRYPTION_PUBLIC_KEY_FILE` | one of key or file | empty | Path to a PEM public key file. Use this instead of `PII_ENCRYPTION_PUBLIC_KEY` when mounting the key into Docker. |
 | `ADMIN_ENABLED` | no | `false` | Enable the password-protected manual import page at `/admin/`. |
 | `ADMIN_PASSWORD` | when admin enabled | empty | Password for `/admin/` manual import. |
-| `KYC_TIMEOUT_SECONDS` | no | `1800` | Pending Alipay verification timeout. Defaults to 30 minutes. |
+| `KYC_TIMEOUT_SECONDS` | no | `82800` | Pending Alipay verification timeout. Defaults to 23 hours. Aliyun is always 30 minutes. |
 | `KYC_POLL_INTERVAL_SECONDS` | no | `60` | Server-side polling interval for pending Alipay verification. |
 | `OIDC_ISSUER` | yes | empty | authentik provider issuer URL. Use the exact issuer from authentik discovery, usually ending with `/`, for example `https://auth.example.com/application/o/alipay-kyc/`. |
 | `OIDC_CLIENT_ID` | yes | empty | OIDC client ID. |
@@ -103,6 +115,16 @@ Configure the Alipay application for identity verification and set the return UR
 | `ALIPAY_CERT_TYPE` | no | `IDENTITY_CARD` | Alipay certificate type. |
 | `ALIPAY_RETURN_URL` | no | `${PUBLIC_URL}/verify/callback` | Browser return URL. |
 | `ALIPAY_CALLBACK_URL` | no | `${PUBLIC_URL}/api/alipay/notify` | Alipay notify URL. |
+| `ALIYUN_KYC_ENABLED` | no | `false` | Enable Aliyun Financial-grade ID Verification as a fallback channel. |
+| `ALIYUN_ACCESS_KEY_ID` | when Aliyun enabled | empty | Alibaba Cloud AccessKey ID for CloudAuth. |
+| `ALIYUN_ACCESS_KEY_SECRET` | when Aliyun enabled | empty | Alibaba Cloud AccessKey secret for CloudAuth. |
+| `ALIYUN_SCENE_ID` | when Aliyun enabled | empty | Aliyun ID Verification scene ID. |
+| `ALIYUN_ENDPOINTS` | no | `cloudauth.cn-shanghai.aliyuncs.com,cloudauth.cn-beijing.aliyuncs.com` | Comma-separated CloudAuth endpoints tried in order. |
+| `ALIYUN_PRODUCT_CODE` | no | `ID_PRO` | Aliyun product code. |
+| `ALIYUN_MODEL` | no | `MOVE_ACTION` | Aliyun liveness model. |
+| `ALIYUN_CERT_TYPE` | no | `IDENTITY_CARD` | Aliyun certificate type. |
+| `ALIYUN_RETURN_URL` | no | `${PUBLIC_URL}/verify/callback` | Aliyun browser return URL. |
+| `ALIYUN_TIMEOUT_SECONDS` | no | `10` | Aliyun API client timeout. |
 
 ## Run
 

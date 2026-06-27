@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/example/authentik-alipay-kyc/internal/alipay"
+	aliyunkyc "github.com/example/authentik-alipay-kyc/internal/aliyun"
 	"github.com/example/authentik-alipay-kyc/internal/authentik"
 	"github.com/example/authentik-alipay-kyc/internal/config"
 	"github.com/example/authentik-alipay-kyc/internal/oidc"
@@ -51,12 +52,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	aliyunClient, err := aliyunkyc.NewClient(cfg.Aliyun)
+	if err != nil {
+		logger.Error("configure aliyun kyc", "error", err)
+		os.Exit(1)
+	}
+
 	app := server.New(server.Dependencies{
 		Config:     cfg,
 		Logger:     logger,
 		OIDC:       oidcClient,
 		Authentik:  authentik.NewClient(cfg.Authentik),
 		Alipay:     alipay.NewClient(cfg.Alipay),
+		Aliyun:     aliyunClient,
 		Stats:      statsStore,
 		PII:        piiStore,
 		StaticFS:   server.StaticFiles(),

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/example/authentik-alipay-kyc/internal/alipay"
+	aliyunkyc "github.com/example/authentik-alipay-kyc/internal/aliyun"
 	"github.com/example/authentik-alipay-kyc/internal/authentik"
 	"github.com/example/authentik-alipay-kyc/internal/config"
 	"github.com/example/authentik-alipay-kyc/internal/oidc"
@@ -91,6 +92,50 @@ func (f *sequenceAlipay) Query(context.Context, string) (alipay.QueryResponse, e
 	}
 	f.calls++
 	return alipay.QueryResponse{Passed: passed}, nil
+}
+
+type fakeAliyun struct {
+	certifyID      string
+	certifyURL     string
+	passed         string
+	initMetaInfo   string
+	initURLType    string
+	initializeCall int
+	queryCall      int
+}
+
+func (f *fakeAliyun) Initialize(_ context.Context, req aliyunkyc.InitializeRequest) (aliyunkyc.InitializeResponse, error) {
+	f.initializeCall++
+	f.initMetaInfo = req.MetaInfo
+	f.initURLType = req.CertifyURLType
+	if f.certifyID == "" {
+		f.certifyID = "ALIYUN123"
+	}
+	if f.certifyURL == "" {
+		f.certifyURL = "https://aliyun.example/certify"
+	}
+	return aliyunkyc.InitializeResponse{CertifyID: f.certifyID, CertifyURL: f.certifyURL}, nil
+}
+
+func (f *fakeAliyun) Query(context.Context, string) (aliyunkyc.QueryResponse, error) {
+	f.queryCall++
+	return aliyunkyc.QueryResponse{Passed: f.passed}, nil
+}
+
+type sequenceAliyun struct {
+	fakeAliyun
+	passes []string
+	calls  int
+}
+
+func (f *sequenceAliyun) Query(context.Context, string) (aliyunkyc.QueryResponse, error) {
+	passed := f.fakeAliyun.passed
+	if f.calls < len(f.passes) {
+		passed = f.passes[f.calls]
+	}
+	f.calls++
+	f.queryCall++
+	return aliyunkyc.QueryResponse{Passed: passed}, nil
 }
 
 type fakePIIStore struct {
@@ -198,6 +243,335 @@ func TestKYCFlowWritesAuthentikAttribute(t *testing.T) {
 	}
 }
 
+func TestAliyunKYCRequiresMetaInfo(t *testing.T) {
+	cfg := testConfig()
+	cfg.Aliyun.Enabled = true
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    &fakeAliyun{passed: "T"},
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"provider":"aliyun","name":"张三","id_number":"11010519491231002X","certify_url_type":"WEB"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range userCookie(t, srv) {
+		req.AddCookie(cookie)
+	}
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAliyunKYCRequiresCertifyURLType(t *testing.T) {
+	cfg := testConfig()
+	cfg.Aliyun.Enabled = true
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    &fakeAliyun{passed: "T"},
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"provider":"aliyun","name":"张三","id_number":"11010519491231002X","meta_info":"{}"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range userCookie(t, srv) {
+		req.AddCookie(cookie)
+	}
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAliyunKYCFlowWritesAuthentikAttribute(t *testing.T) {
+	cfg := testConfig()
+	cfg.Aliyun.Enabled = true
+	ak := &fakeAuthentik{user: authentik.User{
+		ID:         1,
+		Username:   "alice",
+		Attributes: map[string]interface{}{},
+	}}
+	piiStore := &fakePIIStore{}
+	aliyunClient := &fakeAliyun{certifyID: "ALIYUN123", certifyURL: "https://aliyun.example/certify", passed: "T"}
+	statsStore := testStats(t)
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: ak,
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    aliyunClient,
+		Stats:     statsStore,
+		PII:       piiStore,
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	cookies := userCookie(t, srv)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"provider":"aliyun","name":"张三","id_number":"11010519491231002X","meta_info":"{\"deviceType\":\"web\"}","certify_url_type":"WEB"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var startResp struct {
+		Provider   string `json:"provider"`
+		State      string `json:"state"`
+		CertifyID  string `json:"certify_id"`
+		CertifyURL string `json:"certify_url"`
+		ExpiresAt  string `json:"expires_at"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &startResp); err != nil {
+		t.Fatal(err)
+	}
+	if startResp.Provider != ProviderAliyun || startResp.CertifyID != "ALIYUN123" || startResp.CertifyURL != "https://aliyun.example/certify" {
+		t.Fatalf("unexpected aliyun start response: %+v", startResp)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, startResp.ExpiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ttl := time.Until(expiresAt)
+	if ttl < 29*time.Minute || ttl > 31*time.Minute {
+		t.Fatalf("aliyun pending ttl = %s, want about 30m", ttl)
+	}
+	if aliyunClient.initMetaInfo == "" || aliyunClient.initURLType != "WEB" {
+		t.Fatalf("unexpected aliyun init fields: meta=%q type=%q", aliyunClient.initMetaInfo, aliyunClient.initURLType)
+	}
+	cookies = mergeCookies(cookies, rec.Result().Cookies())
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/confirm", strings.NewReader(`{"state":"`+startResp.State+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirm status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !ak.attr.Verified || ak.attr.Channel != ProviderAliyun || ak.attr.IDLast4 != "002X" || ak.attr.NameMasked != "*三" || ak.attr.IDHash == "" {
+		t.Fatalf("unexpected authentik attr: %+v", ak.attr)
+	}
+	if len(piiStore.entries) != 1 || piiStore.entries[0].Provider != ProviderAliyun || piiStore.entries[0].CertifyID != "ALIYUN123" {
+		t.Fatalf("unexpected pii entries: %+v", piiStore.entries)
+	}
+	counters, err := statsStore.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counters.Total != 1 || counters.Success != 1 || counters.Failure != 0 {
+		t.Fatalf("unexpected counters: %+v", counters)
+	}
+}
+
+func TestAliyunKYCConfirmCanBeRetriedAfterNotPassed(t *testing.T) {
+	cfg := testConfig()
+	cfg.Aliyun.Enabled = true
+	ak := &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}}
+	aliyunClient := &sequenceAliyun{passes: []string{"F", "T"}}
+	statsStore := testStats(t)
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: ak,
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    aliyunClient,
+		Stats:     statsStore,
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	cookies := userCookie(t, srv)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"provider":"aliyun","name":"张三","id_number":"11010519491231002X","meta_info":"{}","certify_url_type":"H5"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var startResp struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &startResp); err != nil {
+		t.Fatal(err)
+	}
+	cookies = mergeCookies(cookies, rec.Result().Cookies())
+
+	for i, want := range []int{http.StatusConflict, http.StatusOK} {
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodPost, "/api/kyc/confirm", strings.NewReader(`{"state":"`+startResp.State+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		for _, cookie := range cookies {
+			req.AddCookie(cookie)
+		}
+		handler.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Fatalf("confirm %d status = %d body=%s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	if !ak.attr.Verified || ak.attr.Channel != ProviderAliyun {
+		t.Fatalf("expected aliyun verified attr: %+v", ak.attr)
+	}
+	counters, err := statsStore.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counters.Total != 1 || counters.Success != 1 || counters.Failure != 0 {
+		t.Fatalf("unexpected counters after retry: %+v", counters)
+	}
+}
+
+func TestAliyunPendingKYCExpiresAfterThirtyMinutes(t *testing.T) {
+	cfg := testConfig()
+	cfg.Aliyun.Enabled = true
+	statsStore := testStats(t)
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    &fakeAliyun{passed: "F"},
+		Stats:     statsStore,
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	cookies := userCookie(t, srv)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"provider":"aliyun","name":"张三","id_number":"11010519491231002X","meta_info":"{}","certify_url_type":"WEB"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var startResp struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &startResp); err != nil {
+		t.Fatal(err)
+	}
+	cookies = mergeCookies(cookies, rec.Result().Cookies())
+
+	pending, ok := srv.pendingKYC(startResp.State)
+	if !ok {
+		t.Fatal("pending aliyun verification was not stored")
+	}
+	pending.ExpiresAt = time.Now().UTC().Add(-time.Second)
+	srv.storePendingKYC(pending)
+	srv.checkPendingKYC(context.Background())
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/confirm", strings.NewReader(`{"state":"`+startResp.State+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusGone {
+		t.Fatalf("expired confirm status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	counters, err := statsStore.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counters.Total != 1 || counters.Success != 0 || counters.Failure != 1 {
+		t.Fatalf("unexpected counters after timeout: %+v", counters)
+	}
+}
+
+func TestStartingNewProviderClearsPreviousPending(t *testing.T) {
+	cfg := testConfig()
+	cfg.Aliyun.Enabled = true
+	aliyunClient := &fakeAliyun{passed: "T"}
+	alipayClient := &sequenceAlipay{
+		fakeAlipay: fakeAlipay{certifyID: "CERT123"},
+		passes:     []string{"T"},
+	}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    alipayClient,
+		Aliyun:    aliyunClient,
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	cookies := userCookie(t, srv)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"name":"张三","id_number":"11010519491231002X"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("alipay start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var first struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	cookies = mergeCookies(cookies, rec.Result().Cookies())
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"provider":"aliyun","name":"张三","id_number":"11010519491231002X","meta_info":"{}","certify_url_type":"WEB"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("aliyun start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := srv.pendingKYC(first.State); ok {
+		t.Fatalf("old alipay pending state %q was not cleared", first.State)
+	}
+	srv.checkPendingKYC(context.Background())
+	if alipayClient.calls != 0 {
+		t.Fatalf("old alipay pending was polled %d times", alipayClient.calls)
+	}
+}
+
 func TestMeReturnsQRNoticeHTML(t *testing.T) {
 	cfg := testConfig()
 	cfg.QRNoticeHTML = `<p>扫码后请完成支付宝人脸认证。</p>`
@@ -230,6 +604,42 @@ func TestMeReturnsQRNoticeHTML(t *testing.T) {
 	}
 	if body.QRNoticeHTML != cfg.QRNoticeHTML {
 		t.Fatalf("qr_notice_html = %q, want %q", body.QRNoticeHTML, cfg.QRNoticeHTML)
+	}
+}
+
+func TestMeReturnsEnabledProviders(t *testing.T) {
+	cfg := testConfig()
+	cfg.Aliyun.Enabled = true
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    &fakeAliyun{passed: "T"},
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	for _, cookie := range userCookie(t, srv) {
+		req.AddCookie(cookie)
+	}
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("me status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Providers []string `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(body.Providers, ",") != "alipay,aliyun" {
+		t.Fatalf("providers = %+v, want alipay,aliyun", body.Providers)
 	}
 }
 
@@ -447,7 +857,7 @@ func TestKYCConfirmCanBeRetriedAfterQueryError(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second confirm status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if !ak.attr.Verified {
+	if !ak.attr.Verified || ak.attr.Channel != ProviderAlipay {
 		t.Fatalf("expected authentik attr to be verified: %+v", ak.attr)
 	}
 }
@@ -994,7 +1404,7 @@ func testConfig() config.Config {
 		PublicURL:       "https://kyc.example.com",
 		HashPepper:      "pepper",
 		StatsAPIToken:   "stats-token",
-		KYCTimeout:      30 * time.Minute,
+		KYCTimeout:      AlipayPendingTTL,
 		KYCPollInterval: time.Minute,
 		OIDC: config.OIDCConfig{
 			Issuer:       "https://authentik.example.com/application/o/alipay-kyc/",
@@ -1014,6 +1424,16 @@ func testConfig() config.Config {
 			BizCode:   "FACE",
 			CertType:  "IDENTITY_CARD",
 			ReturnURL: "https://kyc.example.com/verify/callback",
+		},
+		Aliyun: config.AliyunConfig{
+			AccessKeyID:     "ak",
+			AccessKeySecret: "secret",
+			SceneID:         1000000006,
+			Endpoints:       []string{"cloudauth.cn-shanghai.aliyuncs.com", "cloudauth.cn-beijing.aliyuncs.com"},
+			ProductCode:     "ID_PRO",
+			Model:           "MOVE_ACTION",
+			CertType:        "IDENTITY_CARD",
+			ReturnURL:       "https://kyc.example.com/verify/callback",
 		},
 		Session: config.SessionConfig{
 			Name:     "test",

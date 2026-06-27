@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/example/authentik-alipay-kyc/internal/alipay"
+	aliyunkyc "github.com/example/authentik-alipay-kyc/internal/aliyun"
 	"github.com/example/authentik-alipay-kyc/internal/authentik"
 	"github.com/example/authentik-alipay-kyc/internal/config"
 	identitycrypto "github.com/example/authentik-alipay-kyc/internal/crypto"
@@ -24,6 +25,14 @@ import (
 	"github.com/example/authentik-alipay-kyc/internal/piistore"
 	"github.com/example/authentik-alipay-kyc/internal/session"
 	"github.com/example/authentik-alipay-kyc/internal/stats"
+)
+
+const (
+	ProviderAlipay = "alipay"
+	ProviderAliyun = "aliyun"
+
+	AlipayPendingTTL = 23 * time.Hour
+	AliyunPendingTTL = 30 * time.Minute
 )
 
 type OIDCClient interface {
@@ -40,6 +49,11 @@ type AlipayClient interface {
 	Initialize(ctx context.Context, outerOrderNo, certName, certNo, returnURL string) (alipay.InitializeResponse, error)
 	CertifyURL(certifyID string) (string, error)
 	Query(ctx context.Context, certifyID string) (alipay.QueryResponse, error)
+}
+
+type AliyunClient interface {
+	Initialize(ctx context.Context, req aliyunkyc.InitializeRequest) (aliyunkyc.InitializeResponse, error)
+	Query(ctx context.Context, certifyID string) (aliyunkyc.QueryResponse, error)
 }
 
 type StatsStore interface {
@@ -59,6 +73,7 @@ type Dependencies struct {
 	OIDC       OIDCClient
 	Authentik  AuthentikClient
 	Alipay     AlipayClient
+	Aliyun     AliyunClient
 	Stats      StatsStore
 	PII        PIIStore
 	StaticFS   http.FileSystem
@@ -71,6 +86,7 @@ type Server struct {
 	oidc      OIDCClient
 	authentik AuthentikClient
 	alipay    AlipayClient
+	aliyun    AliyunClient
 	stats     StatsStore
 	pii       PIIStore
 	staticFS  http.FileSystem
@@ -87,12 +103,30 @@ type errorResponse struct {
 
 type pendingKYC struct {
 	State      string
+	Provider   string
 	CertifyID  string
 	UserID     string
 	NameMasked string
 	IDHash     string
 	IDLast4    string
 	ExpiresAt  time.Time
+}
+
+type kycStartResult struct {
+	Provider     string
+	CertifyID    string
+	CertifyURL   string
+	AppLaunchURL string
+}
+
+type kycStartInput struct {
+	State          string
+	OuterOrderNo   string
+	Name           string
+	IDNumber       string
+	MetaInfo       string
+	CertifyURLType string
+	UserID         string
 }
 
 type settleKYCResult struct {
@@ -125,7 +159,7 @@ func New(deps Dependencies) *Server {
 		logger = slog.Default()
 	}
 	if deps.Config.KYCTimeout <= 0 {
-		deps.Config.KYCTimeout = 30 * time.Minute
+		deps.Config.KYCTimeout = AlipayPendingTTL
 	}
 	if deps.Config.KYCPollInterval <= 0 {
 		deps.Config.KYCPollInterval = time.Minute
@@ -136,6 +170,7 @@ func New(deps Dependencies) *Server {
 		oidc:      deps.OIDC,
 		authentik: deps.Authentik,
 		alipay:    deps.Alipay,
+		aliyun:    deps.Aliyun,
 		stats:     deps.Stats,
 		pii:       deps.PII,
 		staticFS:  deps.StaticFS,
@@ -276,6 +311,7 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		"user":           user,
 		"verified":       false,
 		"qr_notice_html": s.cfg.QRNoticeHTML,
+		"providers":      s.enabledProviders(),
 	}
 
 	akUser, err := s.authentik.GetUser(r.Context(), userID)
@@ -446,8 +482,11 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name     string `json:"name"`
-		IDNumber string `json:"id_number"`
+		Name           string `json:"name"`
+		IDNumber       string `json:"id_number"`
+		Provider       string `json:"provider"`
+		MetaInfo       string `json:"meta_info"`
+		CertifyURLType string `json:"certify_url_type"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
@@ -481,21 +520,39 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create order number")
 		return
 	}
-	returnURL := addQuery(s.cfg.Alipay.ReturnURL, "state", state)
+	provider := normalizeProvider(req.Provider)
+	if !s.providerEnabled(provider) {
+		s.recordFailure()
+		writeError(w, http.StatusBadRequest, "unsupported verification provider")
+		return
+	}
+	if provider == ProviderAliyun && strings.TrimSpace(req.MetaInfo) == "" {
+		s.recordFailure()
+		writeError(w, http.StatusBadRequest, "meta_info is required for aliyun verification")
+		return
+	}
+	if provider == ProviderAliyun && !validAliyunCertifyURLType(req.CertifyURLType) {
+		s.recordFailure()
+		writeError(w, http.StatusBadRequest, "certify_url_type must be WEB or H5 for aliyun verification")
+		return
+	}
+	s.clearExistingPendingFromSession(sess.Values)
 	outerOrderNo := "ak" + time.Now().UTC().Format("20060102150405") + orderToken[:16]
 	idHash := identitycrypto.IDHash(idNumber, s.cfg.HashPepper)
 
-	initResp, err := s.alipay.Initialize(r.Context(), outerOrderNo, req.Name, idNumber, returnURL)
+	startResp, err := s.startProviderKYC(r.Context(), provider, kycStartInput{
+		State:          state,
+		OuterOrderNo:   outerOrderNo,
+		Name:           req.Name,
+		IDNumber:       idNumber,
+		MetaInfo:       req.MetaInfo,
+		CertifyURLType: req.CertifyURLType,
+		UserID:         userID,
+	})
 	if err != nil {
 		s.recordFailure()
-		s.logger.Warn("alipay initialize failed", "user_id", userID, "error", err)
-		writeError(w, http.StatusBadGateway, "failed to initialize alipay verification")
-		return
-	}
-	certifyURL, err := s.alipay.CertifyURL(initResp.CertifyID)
-	if err != nil {
-		s.recordFailure()
-		writeError(w, http.StatusBadGateway, "failed to create alipay certify url")
+		s.logger.Warn("kyc initialize failed", "provider", provider, "user_id", userID, "error", err)
+		writeError(w, http.StatusBadGateway, "failed to initialize verification")
 		return
 	}
 	if s.pii != nil {
@@ -503,31 +560,34 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 			UserID:       userID,
 			Username:     stringValue(sess.Values[session.UsernameKey]),
 			State:        state,
-			CertifyID:    initResp.CertifyID,
+			Provider:     provider,
+			CertifyID:    startResp.CertifyID,
 			OuterOrderNo: outerOrderNo,
 			IDHash:       idHash,
 			Name:         req.Name,
 			IDNumber:     idNumber,
 		}); err != nil {
 			s.recordFailure()
-			s.logger.Warn("failed to store encrypted pii", "user_id", userID, "certify_id", initResp.CertifyID, "error", err)
+			s.logger.Warn("failed to store encrypted pii", "user_id", userID, "certify_id", startResp.CertifyID, "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to store verification identity")
 			return
 		}
 	}
 	pending := pendingKYC{
 		State:      state,
-		CertifyID:  initResp.CertifyID,
+		Provider:   provider,
+		CertifyID:  startResp.CertifyID,
 		UserID:     userID,
 		NameMasked: identitycrypto.MaskChineseName(req.Name),
 		IDHash:     idHash,
 		IDLast4:    identitycrypto.Last4(idNumber),
-		ExpiresAt:  time.Now().UTC().Add(s.cfg.KYCTimeout),
+		ExpiresAt:  time.Now().UTC().Add(s.pendingTTLForProvider(provider)),
 	}
 
 	if err := s.sessions.Save(r, w, map[interface{}]interface{}{
 		session.KYCStateKey:       state,
-		session.CertifyIDKey:      initResp.CertifyID,
+		session.CertifyIDKey:      startResp.CertifyID,
+		session.KYCProviderKey:    provider,
 		session.PendingExpiresKey: pending.ExpiresAt.Format(time.RFC3339),
 		session.PendingNameKey:    pending.NameMasked,
 		session.PendingIDHashKey:  pending.IDHash,
@@ -540,10 +600,11 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 	s.storePendingKYC(pending)
 
 	writeJSON(w, http.StatusOK, map[string]string{
-		"redirect_url":   certifyURL,
-		"certify_url":    certifyURL,
-		"alipay_app_url": alipay.CertifyAppURL(certifyURL),
-		"certify_id":     initResp.CertifyID,
+		"provider":       provider,
+		"redirect_url":   startResp.CertifyURL,
+		"certify_url":    startResp.CertifyURL,
+		"alipay_app_url": startResp.AppLaunchURL,
+		"certify_id":     startResp.CertifyID,
 		"state":          state,
 		"expires_at":     pending.ExpiresAt.Format(time.RFC3339),
 		"qr_notice_html": s.cfg.QRNoticeHTML,
@@ -630,7 +691,7 @@ func (s *Server) confirmKYC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !result.Passed {
-		writeError(w, http.StatusConflict, "alipay verification has not passed")
+		writeError(w, http.StatusConflict, providerPendingMessage(pending.Provider))
 		return
 	}
 	if err := s.clearPendingKYC(r, w); err != nil {
@@ -650,6 +711,11 @@ func (s *Server) alipayNotify(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) alipayReturn(w http.ResponseWriter, r *http.Request) {
+	state := r.URL.Query().Get("state")
+	if _, ok := s.currentUserID(r); ok && state != "" {
+		http.Redirect(w, r, s.cfg.PublicURL+"/?state="+url.QueryEscape(state), http.StatusFound)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, `<!doctype html>
@@ -726,6 +792,119 @@ func (s *Server) currentUserID(r *http.Request) (string, bool) {
 	return userID, userID != ""
 }
 
+func (s *Server) startProviderKYC(ctx context.Context, provider string, input kycStartInput) (kycStartResult, error) {
+	switch provider {
+	case ProviderAlipay:
+		if s.alipay == nil {
+			return kycStartResult{}, errors.New("alipay provider is not configured")
+		}
+		returnURL := addQuery(s.cfg.Alipay.ReturnURL, "state", input.State)
+		initResp, err := s.alipay.Initialize(ctx, input.OuterOrderNo, input.Name, input.IDNumber, returnURL)
+		if err != nil {
+			return kycStartResult{}, err
+		}
+		certifyURL, err := s.alipay.CertifyURL(initResp.CertifyID)
+		if err != nil {
+			return kycStartResult{}, err
+		}
+		return kycStartResult{
+			Provider:     ProviderAlipay,
+			CertifyID:    initResp.CertifyID,
+			CertifyURL:   certifyURL,
+			AppLaunchURL: alipay.CertifyAppURL(certifyURL),
+		}, nil
+	case ProviderAliyun:
+		if s.aliyun == nil {
+			return kycStartResult{}, errors.New("aliyun provider is not configured")
+		}
+		certifyURLType := strings.ToUpper(strings.TrimSpace(input.CertifyURLType))
+		initResp, err := s.aliyun.Initialize(ctx, aliyunkyc.InitializeRequest{
+			OuterOrderNo:   input.OuterOrderNo,
+			CertName:       input.Name,
+			CertNo:         input.IDNumber,
+			ReturnURL:      addQuery(s.cfg.Aliyun.ReturnURL, "state", input.State),
+			MetaInfo:       input.MetaInfo,
+			CertifyURLType: certifyURLType,
+			UserID:         input.UserID,
+		})
+		if err != nil {
+			return kycStartResult{}, err
+		}
+		return kycStartResult{
+			Provider:   ProviderAliyun,
+			CertifyID:  initResp.CertifyID,
+			CertifyURL: initResp.CertifyURL,
+		}, nil
+	default:
+		return kycStartResult{}, errors.New("unsupported verification provider")
+	}
+}
+
+func (s *Server) queryKYC(ctx context.Context, provider, certifyID string) (bool, error) {
+	switch normalizeProvider(provider) {
+	case ProviderAlipay:
+		if s.alipay == nil {
+			return false, errors.New("alipay provider is not configured")
+		}
+		queryResp, err := s.alipay.Query(ctx, certifyID)
+		if err != nil {
+			return false, err
+		}
+		return strings.ToUpper(queryResp.Passed) == "T", nil
+	case ProviderAliyun:
+		if s.aliyun == nil {
+			return false, errors.New("aliyun provider is not configured")
+		}
+		queryResp, err := s.aliyun.Query(ctx, certifyID)
+		if err != nil {
+			return false, err
+		}
+		return strings.ToUpper(queryResp.Passed) == "T", nil
+	default:
+		return false, errors.New("unsupported verification provider")
+	}
+}
+
+func (s *Server) pendingTTLForProvider(provider string) time.Duration {
+	switch normalizeProvider(provider) {
+	case ProviderAliyun:
+		return AliyunPendingTTL
+	default:
+		if s.cfg.KYCTimeout > 0 {
+			return s.cfg.KYCTimeout
+		}
+		return AlipayPendingTTL
+	}
+}
+
+func (s *Server) enabledProviders() []string {
+	providers := []string{ProviderAlipay}
+	if s.cfg.Aliyun.Enabled && s.aliyun != nil {
+		providers = append(providers, ProviderAliyun)
+	}
+	return providers
+}
+
+func (s *Server) providerEnabled(provider string) bool {
+	for _, enabled := range s.enabledProviders() {
+		if enabled == provider {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) clearExistingPendingFromSession(values map[interface{}]interface{}) {
+	state := stringValue(values[session.KYCStateKey])
+	if state == "" {
+		return
+	}
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	delete(s.pending, state)
+	delete(s.terminal, state)
+}
+
 func (s *Server) adminAuthenticated(r *http.Request) bool {
 	if !s.cfg.Admin.Enabled {
 		return false
@@ -794,6 +973,7 @@ func (s *Server) recordVerifiedIdentity(ctx context.Context, identity verifiedId
 			UserID:       identity.UserID,
 			Username:     identity.Username,
 			State:        firstNonEmpty(identity.State, identity.Channel),
+			Provider:     identity.Channel,
 			CertifyID:    firstNonEmpty(identity.CertifyID, identity.Channel),
 			OuterOrderNo: firstNonEmpty(identity.OuterOrderNo, identity.Channel),
 			IDHash:       idHash,
@@ -874,6 +1054,7 @@ func (s *Server) pendingKYCFromSession(values map[interface{}]interface{}, state
 	pending := pendingKYC{
 		State:      state,
 		CertifyID:  certifyID,
+		Provider:   normalizeProvider(stringValue(values[session.KYCProviderKey])),
 		UserID:     userID,
 		NameMasked: stringValue(values[session.PendingNameKey]),
 		IDHash:     stringValue(values[session.PendingIDHashKey]),
@@ -913,8 +1094,12 @@ func (s *Server) terminalKYC(state string) (terminalKYC, bool) {
 func (s *Server) finishPendingKYC(state string, terminal terminalKYC) {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
+	provider := ProviderAlipay
+	if pending, ok := s.pending[state]; ok {
+		provider = pending.Provider
+	}
 	delete(s.pending, state)
-	terminal.ExpiresAt = time.Now().UTC().Add(s.cfg.KYCTimeout)
+	terminal.ExpiresAt = time.Now().UTC().Add(s.pendingTTLForProvider(provider))
 	s.terminal[state] = terminal
 }
 
@@ -955,17 +1140,17 @@ func (s *Server) settlePendingKYC(ctx context.Context, pending pendingKYC) (sett
 		s.recordFailure()
 		return settleKYCResult{Expired: true}, nil
 	}
-	queryResp, err := s.alipay.Query(ctx, pending.CertifyID)
+	passed, err := s.queryKYC(ctx, pending.Provider, pending.CertifyID)
 	if err != nil {
 		return settleKYCResult{}, err
 	}
-	if strings.ToUpper(queryResp.Passed) != "T" {
+	if !passed {
 		return settleKYCResult{Passed: false}, nil
 	}
 	attr, err := s.markKYCAttribute(ctx, pending.UserID, authentik.KYCAttribute{
 		Verified:   true,
 		VerifiedAt: time.Now().UTC().Format(time.RFC3339),
-		Channel:    "alipay",
+		Channel:    pending.Provider,
 		IDHash:     pending.IDHash,
 		IDLast4:    pending.IDLast4,
 		NameMasked: pending.NameMasked,
@@ -982,15 +1167,15 @@ func (s *Server) checkPendingKYC(ctx context.Context) {
 	for _, pending := range s.pendingKYCSnapshot() {
 		result, err := s.settlePendingKYC(ctx, pending)
 		if err != nil {
-			s.logger.Warn("failed to poll pending verification", "user_id", pending.UserID, "certify_id", pending.CertifyID, "error", err)
+			s.logger.Warn("failed to poll pending verification", "provider", pending.Provider, "user_id", pending.UserID, "certify_id", pending.CertifyID, "error", err)
 			continue
 		}
 		if result.Expired {
-			s.logger.Info("pending verification expired", "user_id", pending.UserID, "certify_id", pending.CertifyID)
+			s.logger.Info("pending verification expired", "provider", pending.Provider, "user_id", pending.UserID, "certify_id", pending.CertifyID)
 			continue
 		}
 		if result.Passed {
-			s.logger.Info("pending verification completed", "user_id", pending.UserID, "certify_id", pending.CertifyID)
+			s.logger.Info("pending verification completed", "provider", pending.Provider, "user_id", pending.UserID, "certify_id", pending.CertifyID)
 		}
 	}
 }
@@ -999,6 +1184,7 @@ func (s *Server) clearPendingKYC(r *http.Request, w http.ResponseWriter) error {
 	return s.sessions.Save(r, w, map[interface{}]interface{}{
 		session.KYCStateKey:       nil,
 		session.CertifyIDKey:      nil,
+		session.KYCProviderKey:    nil,
 		session.PendingExpiresKey: nil,
 		session.PendingNameKey:    nil,
 		session.PendingIDHashKey:  nil,
@@ -1072,6 +1258,35 @@ func addQuery(rawURL, key, value string) string {
 	q.Set(key, value)
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+func normalizeProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "", ProviderAlipay:
+		return ProviderAlipay
+	case ProviderAliyun:
+		return ProviderAliyun
+	default:
+		return strings.ToLower(strings.TrimSpace(provider))
+	}
+}
+
+func providerPendingMessage(provider string) string {
+	switch normalizeProvider(provider) {
+	case ProviderAliyun:
+		return "aliyun verification has not passed"
+	default:
+		return "alipay verification has not passed"
+	}
+}
+
+func validAliyunCertifyURLType(value string) bool {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "WEB", "H5":
+		return true
+	default:
+		return false
+	}
 }
 
 func stringValue(value interface{}) string {

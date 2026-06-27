@@ -29,6 +29,14 @@ services:
       ALIPAY_PUBLIC_KEY: "${ALIPAY_PUBLIC_KEY}"
       ALIPAY_BIZ_CODE: "FACE"
       ALIPAY_CERT_TYPE: "IDENTITY_CARD"
+      ALIYUN_KYC_ENABLED: "${ALIYUN_KYC_ENABLED:-false}"
+      ALIYUN_ACCESS_KEY_ID: "${ALIYUN_ACCESS_KEY_ID:-}"
+      ALIYUN_ACCESS_KEY_SECRET: "${ALIYUN_ACCESS_KEY_SECRET:-}"
+      ALIYUN_SCENE_ID: "${ALIYUN_SCENE_ID:-}"
+      ALIYUN_ENDPOINTS: "${ALIYUN_ENDPOINTS:-cloudauth.cn-shanghai.aliyuncs.com,cloudauth.cn-beijing.aliyuncs.com}"
+      ALIYUN_PRODUCT_CODE: "${ALIYUN_PRODUCT_CODE:-ID_PRO}"
+      ALIYUN_MODEL: "${ALIYUN_MODEL:-MOVE_ACTION}"
+      ALIYUN_CERT_TYPE: "${ALIYUN_CERT_TYPE:-IDENTITY_CARD}"
     volumes:
       - alipay-kyc-data:/data
       - ./pii-public.pem:/pii-public.pem:ro
