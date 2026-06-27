@@ -54,26 +54,26 @@ func TestLoadRejectsBothPIIPublicKeyEnvForms(t *testing.T) {
 	}
 }
 
-func TestLoadRequiresAdminPasswordWhenEnabled(t *testing.T) {
+func TestLoadRequiresAdminAllowedUsernamesWhenEnabled(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("ADMIN_ENABLED", "true")
 
 	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "ADMIN_PASSWORD is required") {
-		t.Fatalf("Load error = %v, want admin password required", err)
+	if err == nil || !strings.Contains(err.Error(), "ADMIN_ALLOWED_USERNAMES is required") {
+		t.Fatalf("Load error = %v, want admin username allowlist required", err)
 	}
 }
 
-func TestLoadAcceptsAdminPasswordWhenEnabled(t *testing.T) {
+func TestLoadAcceptsAdminAllowedUsernamesWhenEnabled(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("ADMIN_ENABLED", "true")
-	t.Setenv("ADMIN_PASSWORD", "secret")
+	t.Setenv("ADMIN_ALLOWED_USERNAMES", "alice, bob")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Admin.Enabled || cfg.Admin.Password != "secret" {
+	if !cfg.Admin.Enabled || len(cfg.Admin.AllowedUsernames) != 2 || cfg.Admin.AllowedUsernames[0] != "alice" || cfg.Admin.AllowedUsernames[1] != "bob" {
 		t.Fatalf("unexpected admin config: %+v", cfg.Admin)
 	}
 }

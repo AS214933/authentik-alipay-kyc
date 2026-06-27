@@ -81,8 +81,8 @@ type AliyunConfig struct {
 }
 
 type AdminConfig struct {
-	Enabled  bool
-	Password string
+	Enabled          bool
+	AllowedUsernames []string
 }
 
 type SessionConfig struct {
@@ -171,8 +171,8 @@ func Load() (Config, error) {
 			Timeout:         secondsEnv("ALIYUN_TIMEOUT_SECONDS", 10),
 		},
 		Admin: AdminConfig{
-			Enabled:  boolEnv("ADMIN_ENABLED", false),
-			Password: getenv("ADMIN_PASSWORD", ""),
+			Enabled:          boolEnv("ADMIN_ENABLED", false),
+			AllowedUsernames: splitCSV(getenv("ADMIN_ALLOWED_USERNAMES", "")),
 		},
 		Session: SessionConfig{
 			Name:     getenv("SESSION_NAME", "alipay_kyc"),
@@ -214,8 +214,8 @@ func Load() (Config, error) {
 			return Config{}, errors.New("ALIYUN_ENDPOINTS must contain at least one endpoint when ALIYUN_KYC_ENABLED is true")
 		}
 	}
-	if cfg.Admin.Enabled && cfg.Admin.Password == "" {
-		return Config{}, errors.New("ADMIN_PASSWORD is required when ADMIN_ENABLED is true")
+	if cfg.Admin.Enabled && len(cfg.Admin.AllowedUsernames) == 0 {
+		return Config{}, errors.New("ADMIN_ALLOWED_USERNAMES is required when ADMIN_ENABLED is true")
 	}
 	return cfg, nil
 }

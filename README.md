@@ -95,8 +95,8 @@ Aliyun `CertifyId` and `CertifyUrl` are valid for 30 minutes and can only be sub
 | `PII_ENCRYPTION_PUBLIC_KEY_TYPE` | no | `rsa` | Public key type for local PII encryption. Supported values: `rsa`, `sm2`. |
 | `PII_ENCRYPTION_PUBLIC_KEY` | one of key or file | empty | PEM public key used to encrypt local PII records. RSA uses RSA-OAEP-SHA256; SM2 uses ASN.1 SM2 ciphertext. |
 | `PII_ENCRYPTION_PUBLIC_KEY_FILE` | one of key or file | empty | Path to a PEM public key file. Use this instead of `PII_ENCRYPTION_PUBLIC_KEY` when mounting the key into Docker. |
-| `ADMIN_ENABLED` | no | `false` | Enable the password-protected manual import page at `/admin/`. |
-| `ADMIN_PASSWORD` | when admin enabled | empty | Password for `/admin/` manual import. |
+| `ADMIN_ENABLED` | no | `false` | Enable the manual import page at `/admin/`. |
+| `ADMIN_ALLOWED_USERNAMES` | when admin enabled | empty | Comma-separated OIDC usernames allowed to use `/admin/` after normal login. |
 | `KYC_TIMEOUT_SECONDS` | no | `82800` | Pending Alipay verification timeout. Defaults to 23 hours. Aliyun is always 30 minutes. |
 | `KYC_POLL_INTERVAL_SECONDS` | no | `60` | Server-side polling interval for pending Alipay verification. |
 | `OIDC_ISSUER` | yes | empty | authentik provider issuer URL. Use the exact issuer from authentik discovery, usually ending with `/`, for example `https://auth.example.com/application/o/alipay-kyc/`. |
@@ -164,7 +164,7 @@ scripts/decrypt-pii-sm2.sh ./pii-private.pem ./alipay-kyc-data/kyc_pii/<id_hash>
 
 Manual admin import:
 
-Set `ADMIN_ENABLED=true` and `ADMIN_PASSWORD` to enable `/admin/`. The admin page can import a user by authentik user ID, name, ID number, and a `需要 KYC 认证` switch.
+Set `ADMIN_ENABLED=true` and `ADMIN_ALLOWED_USERNAMES` to enable `/admin/` for specific logged-in users. Authorization is based on the OIDC username stored in the session, typically `preferred_username`. The admin page can import a user by authentik user ID, name, ID number, and a `需要 KYC 认证` switch.
 
 When `需要 KYC 认证` is `否`, the service writes the same local encrypted PII record and authentik attribute shape as the normal flow immediately, using `channel: "admin"`, without incrementing verification counters.
 

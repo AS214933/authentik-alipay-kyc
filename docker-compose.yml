@@ -15,7 +15,7 @@ services:
       PII_ENCRYPTION_PUBLIC_KEY_TYPE: "${PII_ENCRYPTION_PUBLIC_KEY_TYPE:-rsa}"
       PII_ENCRYPTION_PUBLIC_KEY_FILE: "/pii-public.pem"
       ADMIN_ENABLED: "${ADMIN_ENABLED:-false}"
-      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-}"
+      ADMIN_ALLOWED_USERNAMES: "${ADMIN_ALLOWED_USERNAMES:-}"
       OIDC_ISSUER: "https://authentik.example.com/application/o/alipay-kyc/"
       OIDC_CLIENT_ID: "${OIDC_CLIENT_ID}"
       OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET}"

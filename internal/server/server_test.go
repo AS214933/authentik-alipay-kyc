@@ -1221,7 +1221,7 @@ func TestStatsAPIRequiresBearerToken(t *testing.T) {
 func TestAdminImportRequiresLogin(t *testing.T) {
 	cfg := testConfig()
 	cfg.Admin.Enabled = true
-	cfg.Admin.Password = "admin-secret"
+	cfg.Admin.AllowedUsernames = []string{"admin"}
 	srv := New(Dependencies{
 		Config:    cfg,
 		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
@@ -1244,10 +1244,10 @@ func TestAdminImportRequiresLogin(t *testing.T) {
 	}
 }
 
-func TestAdminImportRequiresCSRFToken(t *testing.T) {
+func TestAdminImportRequiresAllowedUsername(t *testing.T) {
 	cfg := testConfig()
 	cfg.Admin.Enabled = true
-	cfg.Admin.Password = "admin-secret"
+	cfg.Admin.AllowedUsernames = []string{"admin"}
 	srv := New(Dependencies{
 		Config:    cfg,
 		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
@@ -1261,12 +1261,43 @@ func TestAdminImportRequiresCSRFToken(t *testing.T) {
 		}),
 	})
 	handler := srv.Handler()
-	admin := adminSession(t, handler, "admin-secret")
+	cookies := adminCookie(t, srv, "bob")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"张三","id_number":"11010519491231002X","verified":true}`))
 	req.Header.Set("Content-Type", "application/json")
-	for _, cookie := range admin.cookies {
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("admin import with disallowed username status = %d, want %d body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+	}
+}
+
+func TestAdminImportRequiresCSRFToken(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.AllowedUsernames = []string{"admin"}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	cookies := adminCookie(t, srv, "admin")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"\u5f20\u4e09","id_number":"11010519491231002X","verified":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
 		req.AddCookie(cookie)
 	}
 	handler.ServeHTTP(rec, req)
@@ -1275,10 +1306,10 @@ func TestAdminImportRequiresCSRFToken(t *testing.T) {
 	}
 }
 
-func TestAdminStatusReturnsCSRFTokenWhenAuthenticated(t *testing.T) {
+func TestAdminStatusReturnsAllowedWhenUsernameMatches(t *testing.T) {
 	cfg := testConfig()
 	cfg.Admin.Enabled = true
-	cfg.Admin.Password = "admin-secret"
+	cfg.Admin.AllowedUsernames = []string{"admin"}
 	srv := New(Dependencies{
 		Config:    cfg,
 		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
@@ -1292,11 +1323,54 @@ func TestAdminStatusReturnsCSRFTokenWhenAuthenticated(t *testing.T) {
 		}),
 	})
 	handler := srv.Handler()
-	admin := adminSession(t, handler, "admin-secret")
+	cookies := adminCookie(t, srv, "admin")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
-	for _, cookie := range admin.cookies {
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Enabled       bool   `json:"enabled"`
+		Authenticated bool   `json:"authenticated"`
+		Allowed       bool   `json:"allowed"`
+		LoginURL      string `json:"login_url"`
+		CSRFToken     string `json:"csrf_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Enabled || !body.Authenticated || !body.Allowed || !strings.Contains(body.LoginURL, "/auth/login") || body.CSRFToken == "" {
+		t.Fatalf("unexpected admin status body: %+v", body)
+	}
+}
+
+func TestAdminStatusShowsAuthenticatedButNotAllowed(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.AllowedUsernames = []string{"admin"}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	cookies := adminCookie(t, srv, "bob")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	for _, cookie := range cookies {
 		req.AddCookie(cookie)
 	}
 	handler.ServeHTTP(rec, req)
@@ -1305,51 +1379,21 @@ func TestAdminStatusReturnsCSRFTokenWhenAuthenticated(t *testing.T) {
 	}
 	var body struct {
 		Authenticated bool   `json:"authenticated"`
+		Allowed       bool   `json:"allowed"`
 		CSRFToken     string `json:"csrf_token"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if !body.Authenticated || body.CSRFToken != admin.csrfToken {
+	if !body.Authenticated || body.Allowed || body.CSRFToken != "" {
 		t.Fatalf("unexpected admin status body: %+v", body)
-	}
-}
-
-func TestAdminLogoutRequiresCSRFToken(t *testing.T) {
-	cfg := testConfig()
-	cfg.Admin.Enabled = true
-	cfg.Admin.Password = "admin-secret"
-	srv := New(Dependencies{
-		Config:    cfg,
-		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
-		OIDC:      fakeOIDC{},
-		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
-		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
-		Stats:     testStats(t),
-		PII:       &fakePIIStore{},
-		StaticFS: http.FS(fstest.MapFS{
-			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
-		}),
-	})
-	handler := srv.Handler()
-	admin := adminSession(t, handler, "admin-secret")
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/admin/logout", strings.NewReader(`{}`))
-	req.Header.Set("Content-Type", "application/json")
-	for _, cookie := range admin.cookies {
-		req.AddCookie(cookie)
-	}
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("admin logout without csrf status = %d, want %d body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
 	}
 }
 
 func TestAdminImportWritesPIIAndAuthentikWithoutStats(t *testing.T) {
 	cfg := testConfig()
 	cfg.Admin.Enabled = true
-	cfg.Admin.Password = "admin-secret"
+	cfg.Admin.AllowedUsernames = []string{"admin"}
 	ak := &fakeAuthentik{user: authentik.User{
 		ID:         5,
 		Username:   "bob",
@@ -1370,8 +1414,7 @@ func TestAdminImportWritesPIIAndAuthentikWithoutStats(t *testing.T) {
 		}),
 	})
 	handler := srv.Handler()
-
-	admin := adminSession(t, handler, "admin-secret")
+	admin := adminSession(t, handler, srv, "admin")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"李四","id_number":"440524188001010014","verified":true}`))
@@ -1417,7 +1460,7 @@ func TestAdminImportWritesPIIAndAuthentikWithoutStats(t *testing.T) {
 func TestAdminImportCreatesKYCInviteWhenRequired(t *testing.T) {
 	cfg := testConfig()
 	cfg.Admin.Enabled = true
-	cfg.Admin.Password = "admin-secret"
+	cfg.Admin.AllowedUsernames = []string{"admin"}
 	ak := &fakeAuthentik{user: authentik.User{
 		ID:         5,
 		Username:   "bob",
@@ -1436,8 +1479,7 @@ func TestAdminImportCreatesKYCInviteWhenRequired(t *testing.T) {
 		}),
 	})
 	handler := srv.Handler()
-
-	admin := adminSession(t, handler, "admin-secret")
+	admin := adminSession(t, handler, srv, "admin")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"李四","id_number":"440524188001010014","requires_kyc":true}`))
@@ -1474,7 +1516,7 @@ func TestAdminImportCreatesKYCInviteWhenRequired(t *testing.T) {
 func TestAdminKYCInviteCanStartWithoutLoginAndWritesTargetUser(t *testing.T) {
 	cfg := testConfig()
 	cfg.Admin.Enabled = true
-	cfg.Admin.Password = "admin-secret"
+	cfg.Admin.AllowedUsernames = []string{"admin"}
 	ak := &fakeAuthentik{user: authentik.User{
 		ID:         5,
 		Username:   "bob",
@@ -1494,7 +1536,7 @@ func TestAdminKYCInviteCanStartWithoutLoginAndWritesTargetUser(t *testing.T) {
 		}),
 	})
 	handler := srv.Handler()
-	admin := adminSession(t, handler, "admin-secret")
+	admin := adminSession(t, handler, srv, "admin")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"李四","id_number":"440524188001010014","requires_kyc":true}`))
@@ -1550,7 +1592,7 @@ func TestAdminKYCInviteCanStartWithoutLoginAndWritesTargetUser(t *testing.T) {
 func TestAdminKYCInviteReturnRedirectsWithoutLogin(t *testing.T) {
 	cfg := testConfig()
 	cfg.Admin.Enabled = true
-	cfg.Admin.Password = "admin-secret"
+	cfg.Admin.AllowedUsernames = []string{"admin"}
 	srv := New(Dependencies{
 		Config:    cfg,
 		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
@@ -1564,7 +1606,7 @@ func TestAdminKYCInviteReturnRedirectsWithoutLogin(t *testing.T) {
 		}),
 	})
 	handler := srv.Handler()
-	admin := adminSession(t, handler, "admin-secret")
+	admin := adminSession(t, handler, srv, "admin")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"李四","id_number":"440524188001010014","requires_kyc":true}`))
@@ -1612,7 +1654,6 @@ func TestAdminKYCInviteReturnRedirectsWithoutLogin(t *testing.T) {
 		t.Fatalf("return location = %q", location)
 	}
 }
-
 func userCookie(t *testing.T, srv *Server) []*http.Cookie {
 	t.Helper()
 	rec := httptest.NewRecorder()
@@ -1627,19 +1668,36 @@ func userCookie(t *testing.T, srv *Server) []*http.Cookie {
 	return rec.Result().Cookies()
 }
 
+func adminCookie(t *testing.T, srv *Server, username string) []*http.Cookie {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	if err := srv.sessions.Save(req, rec, map[interface{}]interface{}{
+		"user_id":      "99",
+		"username":     username,
+		"display_name": username,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return rec.Result().Cookies()
+}
+
 type adminTestSession struct {
 	cookies   []*http.Cookie
 	csrfToken string
 }
 
-func adminSession(t *testing.T, handler http.Handler, password string) adminTestSession {
+func adminSession(t *testing.T, handler http.Handler, srv *Server, username string) adminTestSession {
 	t.Helper()
+	cookies := adminCookie(t, srv, username)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/admin/login", strings.NewReader(`{"password":"`+password+`"}`))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("admin login status = %d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("admin status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	var body struct {
 		CSRFToken string `json:"csrf_token"`
@@ -1648,9 +1706,9 @@ func adminSession(t *testing.T, handler http.Handler, password string) adminTest
 		t.Fatal(err)
 	}
 	if body.CSRFToken == "" {
-		t.Fatal("admin login did not return csrf token")
+		t.Fatal("admin status did not return csrf token")
 	}
-	return adminTestSession{cookies: rec.Result().Cookies(), csrfToken: body.CSRFToken}
+	return adminTestSession{cookies: mergeCookies(cookies, rec.Result().Cookies()), csrfToken: body.CSRFToken}
 }
 
 func mergeCookies(existing, updates []*http.Cookie) []*http.Cookie {

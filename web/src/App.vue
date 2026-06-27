@@ -7,7 +7,7 @@
             <p class="eyebrow">管理导入</p>
             <h1>手动认证导入</h1>
           </div>
-          <button v-if="admin.authenticated" class="icon-button" type="button" title="退出" @click="adminLogout">
+          <button v-if="admin.authenticated" class="icon-button" type="button" title="退出" @click="logout">
             <LogOut :size="18" />
           </button>
         </header>
@@ -23,17 +23,21 @@
             <p>需要先在服务端开启管理员导入开关。</p>
           </div>
 
-          <form v-else-if="!admin.authenticated" class="form" @submit.prevent="adminLogin">
-            <label>
-              <span>管理员密码</span>
-              <input v-model="adminLoginForm.password" type="password" autocomplete="current-password" required />
-            </label>
-            <button class="primary" type="submit" :disabled="admin.busy">
-              <LoaderCircle v-if="admin.busy" class="spin" :size="18" />
-              <LogIn v-else :size="18" />
+          <div v-else-if="!admin.authenticated" class="empty">
+            <ShieldCheck :size="38" />
+            <h2>需要登录</h2>
+            <p>请先通过 Authentik 登录后再使用手动认证导入。</p>
+            <button class="primary" type="button" @click="adminLogin">
+              <LogIn :size="18" />
               登录
             </button>
-          </form>
+          </div>
+
+          <div v-else-if="!admin.allowed" class="empty">
+            <ShieldAlert :size="38" />
+            <h2>无权使用管理导入</h2>
+            <p>当前登录用户名不在允许名单中。</p>
+          </div>
 
           <template v-else>
             <form class="form" @submit.prevent="adminImport">
@@ -139,11 +143,17 @@
                 <span class="label">当前用户</span>
                 <strong>{{ state.user.username || state.user.display_name || state.user.id }}</strong>
               </div>
-              <span class="status" :class="{ verified: state.verified }">
-                <CircleCheck v-if="state.verified" :size="16" />
-                <Clock3 v-else :size="16" />
-                {{ state.verified ? '已认证' : '未认证' }}
-              </span>
+              <div class="account-actions">
+                <a v-if="state.adminEnabled && state.adminAllowed" class="secondary admin-entry" href="/admin">
+                  <Upload :size="16" />
+                  手动导入
+                </a>
+                <span class="status" :class="{ verified: state.verified }">
+                  <CircleCheck v-if="state.verified" :size="16" />
+                  <Clock3 v-else :size="16" />
+                  {{ state.verified ? '已认证' : '未认证' }}
+                </span>
+              </div>
             </div>
 
             <div v-if="state.verified && state.kyc" class="result-grid">
@@ -270,6 +280,8 @@ const state = reactive({
   verified: false,
   user: {},
   kyc: null,
+  adminEnabled: false,
+  adminAllowed: false,
   providers: ['alipay'],
   provider: 'alipay',
   pendingProvider: '',
@@ -299,15 +311,13 @@ const admin = reactive({
   busy: false,
   enabled: false,
   authenticated: false,
+  allowed: false,
   csrfToken: '',
+  loginUrl: '/auth/login?return_to=%2Fadmin',
   result: null,
   invite: null,
   error: '',
   success: ''
-})
-
-const adminLoginForm = reactive({
-  password: ''
 })
 
 const adminImportForm = reactive({
@@ -389,6 +399,8 @@ async function loadMe() {
     state.user = data.user || {}
     state.verified = Boolean(data.verified)
     state.kyc = data.kyc || null
+    state.adminEnabled = Boolean(data.admin_enabled)
+    state.adminAllowed = Boolean(data.admin_allowed)
     state.qrNoticeHtml = data.qr_notice_html || ''
     if (!state.invite.active && data.kyc_invite?.token) {
       inviteToken.value = data.kyc_invite.token
@@ -447,42 +459,14 @@ async function loadAdminStatus() {
     const data = await request('/api/admin/status')
     admin.enabled = Boolean(data.enabled)
     admin.authenticated = Boolean(data.authenticated)
+    admin.allowed = Boolean(data.allowed)
     admin.csrfToken = data.csrf_token || ''
+    admin.loginUrl = data.login_url || '/auth/login?return_to=%2Fadmin'
   } catch (err) {
     admin.error = err.message
   } finally {
     admin.loading = false
   }
-}
-
-async function adminLogin() {
-  admin.busy = true
-  admin.error = ''
-  admin.success = ''
-  try {
-    const data = await request('/api/admin/login', {
-      method: 'POST',
-      body: JSON.stringify({ password: adminLoginForm.password })
-    })
-    admin.authenticated = true
-    admin.csrfToken = data.csrf_token || ''
-    adminLoginForm.password = ''
-  } catch (err) {
-    admin.error = err.status === 401 ? '管理员密码不正确' : err.message
-  } finally {
-    admin.busy = false
-  }
-}
-
-async function adminLogout() {
-  await request('/api/admin/logout', {
-    method: 'POST',
-    headers: adminCSRFHeaders(),
-    body: '{}'
-  })
-  admin.authenticated = false
-  admin.csrfToken = ''
-  admin.result = null
 }
 
 async function adminImport() {
@@ -522,8 +506,8 @@ async function adminImport() {
     admin.success = data.requires_kyc ? '已生成快捷 KYC 链接' : '已写入本地加密记录并回传 Authentik'
   } catch (err) {
     if (err.status === 401) {
-      admin.authenticated = false
-      admin.error = '管理员登录已失效，请重新登录'
+      admin.allowed = false
+      admin.error = '当前登录用户无权使用管理导入或登录已失效'
     } else {
       admin.error = err.message
     }
@@ -538,6 +522,10 @@ function adminCSRFHeaders() {
 
 function login() {
   window.location.href = state.loginUrl || '/auth/login'
+}
+
+function adminLogin() {
+  window.location.href = admin.loginUrl || '/auth/login?return_to=%2Fadmin'
 }
 
 async function logout() {

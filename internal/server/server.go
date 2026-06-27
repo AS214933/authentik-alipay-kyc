@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -220,8 +219,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("GET /api/stats", s.statsSnapshot)
 	mux.HandleFunc("GET /api/admin/status", s.adminStatus)
-	mux.HandleFunc("POST /api/admin/login", s.adminLogin)
-	mux.HandleFunc("POST /api/admin/logout", s.adminLogout)
 	mux.HandleFunc("POST /api/admin/import", s.adminImport)
 	mux.HandleFunc("GET /api/kyc/invite", s.kycInvite)
 	mux.HandleFunc("POST /api/kyc/start", s.startKYC)
@@ -249,6 +246,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if err := s.sessions.Save(r, w, map[interface{}]interface{}{
 		session.OIDCStateKey: state,
 		session.OIDCNonceKey: nonce,
+		session.ReturnToKey:  sanitizeReturnTo(r.URL.Query().Get("return_to")),
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save session")
 		return
@@ -284,6 +282,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	displayName := firstNonEmpty(claims.Name, claims.Nickname, claims.PreferredUsername, claims.Email, claims.Subject)
+	returnTo := stringValue(sess.Values[session.ReturnToKey])
 	if err := s.sessions.Save(r, w, map[interface{}]interface{}{
 		session.UserIDKey:      userID,
 		session.UsernameKey:    claims.PreferredUsername,
@@ -291,11 +290,16 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		session.DisplayNameKey: displayName,
 		session.OIDCStateKey:   nil,
 		session.OIDCNonceKey:   nil,
+		session.ReturnToKey:    nil,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save login")
 		return
 	}
-	http.Redirect(w, r, s.cfg.PublicURL+"/", http.StatusFound)
+	redirectTo := s.cfg.PublicURL + "/"
+	if returnTo != "" {
+		redirectTo = s.cfg.PublicURL + returnTo
+	}
+	http.Redirect(w, r, redirectTo, http.StatusFound)
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -324,6 +328,8 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		"authenticated":  true,
 		"user":           user,
 		"verified":       false,
+		"admin_enabled":  s.cfg.Admin.Enabled,
+		"admin_allowed":  s.adminAllowedSession(sess.Values),
 		"qr_notice_html": s.cfg.QRNoticeHTML,
 		"providers":      s.enabledProviders(),
 	}
@@ -369,66 +375,28 @@ func (s *Server) statsSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
-	authenticated := s.adminAuthenticated(r)
+	sess, err := s.sessions.Get(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid session")
+		return
+	}
+	authenticated := stringValue(sess.Values[session.UserIDKey]) != ""
+	allowed := s.adminAllowedSession(sess.Values)
 	response := map[string]interface{}{
 		"enabled":       s.cfg.Admin.Enabled,
 		"authenticated": authenticated,
+		"allowed":       allowed,
+		"login_url":     s.cfg.PublicURL + "/auth/login?return_to=%2Fadmin",
 	}
-	if authenticated {
-		if token, ok := s.adminCSRFToken(r); ok {
-			response["csrf_token"] = token
+	if allowed {
+		token, err := s.ensureAdminCSRFToken(r, w, sess.Values)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create admin csrf token")
+			return
 		}
+		response["csrf_token"] = token
 	}
 	writeJSON(w, http.StatusOK, response)
-}
-
-func (s *Server) adminLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.Admin.Enabled {
-		writeError(w, http.StatusNotFound, "admin import is disabled")
-		return
-	}
-	var req struct {
-		Password string `json:"password"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json body")
-		return
-	}
-	if !s.compareAdminPassword(req.Password) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	csrfToken, err := oidc.RandomToken()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create admin csrf token")
-		return
-	}
-	if err := s.sessions.Save(r, w, map[interface{}]interface{}{
-		session.AdminKey:     "true",
-		session.AdminCSRFKey: csrfToken,
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save admin session")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"authenticated": true,
-		"csrf_token":    csrfToken,
-	})
-}
-
-func (s *Server) adminLogout(w http.ResponseWriter, r *http.Request) {
-	if !s.validAdminCSRF(r) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	if err := s.sessions.Save(r, w, map[interface{}]interface{}{
-		session.AdminKey:     nil,
-		session.AdminCSRFKey: nil,
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to clear admin session")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": false})
 }
 
 func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
@@ -436,7 +404,7 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "admin import is disabled")
 		return
 	}
-	if !s.validAdminCSRF(r) {
+	if !s.adminAuthorized(r) || !s.validAdminCSRF(r) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -1006,18 +974,7 @@ func (s *Server) providerEnabled(provider string) bool {
 	return false
 }
 
-func (s *Server) clearExistingPendingFromSession(values map[interface{}]interface{}) {
-	state := stringValue(values[session.KYCStateKey])
-	if state == "" {
-		return
-	}
-	s.pendingMu.Lock()
-	defer s.pendingMu.Unlock()
-	delete(s.pending, state)
-	delete(s.terminal, state)
-}
-
-func (s *Server) adminAuthenticated(r *http.Request) bool {
+func (s *Server) adminAuthorized(r *http.Request) bool {
 	if !s.cfg.Admin.Enabled {
 		return false
 	}
@@ -1025,41 +982,51 @@ func (s *Server) adminAuthenticated(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	value, _ := sess.Values[session.AdminKey].(string)
-	return value == "true"
+	return stringValue(sess.Values[session.UserIDKey]) != "" && s.adminAllowedSession(sess.Values)
 }
 
-func (s *Server) adminCSRFToken(r *http.Request) (string, bool) {
-	if !s.adminAuthenticated(r) {
-		return "", false
+func (s *Server) adminAllowedSession(values map[interface{}]interface{}) bool {
+	if !s.cfg.Admin.Enabled {
+		return false
 	}
-	sess, err := s.sessions.Get(r)
+	username := strings.TrimSpace(stringValue(values[session.UsernameKey]))
+	if username == "" {
+		return false
+	}
+	for _, allowed := range s.cfg.Admin.AllowedUsernames {
+		if username == strings.TrimSpace(allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) ensureAdminCSRFToken(r *http.Request, w http.ResponseWriter, values map[interface{}]interface{}) (string, error) {
+	token := stringValue(values[session.AdminCSRFKey])
+	if token != "" {
+		return token, nil
+	}
+	token, err := oidc.RandomToken()
 	if err != nil {
-		return "", false
+		return "", err
 	}
-	token, _ := sess.Values[session.AdminCSRFKey].(string)
-	return token, token != ""
+	if err := s.sessions.Save(r, w, map[interface{}]interface{}{session.AdminCSRFKey: token}); err != nil {
+		return "", err
+	}
+	return token, nil
 }
 
 func (s *Server) validAdminCSRF(r *http.Request) bool {
-	expected, ok := s.adminCSRFToken(r)
-	if !ok {
+	sess, err := s.sessions.Get(r)
+	if err != nil {
 		return false
 	}
+	expected := stringValue(sess.Values[session.AdminCSRFKey])
 	actual := strings.TrimSpace(r.Header.Get("X-CSRF-Token"))
-	if actual == "" {
+	if expected == "" || actual == "" {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) == 1
-}
-
-func (s *Server) compareAdminPassword(password string) bool {
-	if s.cfg.Admin.Password == "" {
-		return false
-	}
-	got := sha256.Sum256([]byte(password))
-	want := sha256.Sum256([]byte(s.cfg.Admin.Password))
-	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
 }
 
 func (s *Server) authorizeStatsAPI(r *http.Request) bool {
@@ -1515,6 +1482,18 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func sanitizeReturnTo(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") {
+		return ""
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.IsAbs() || u.Host != "" {
+		return ""
+	}
+	return u.RequestURI()
 }
 
 func secureHeaders(next http.Handler) http.Handler {

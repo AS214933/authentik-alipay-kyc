@@ -52,6 +52,14 @@ select {
   gap: 16px;
 }
 
+.account-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .topbar {
   margin-bottom: 26px;
 }
@@ -203,6 +211,18 @@ h2 {
   color: #0f6b56;
   font-weight: 700;
   cursor: pointer;
+}
+
+.admin-entry {
+  width: auto;
+  min-height: 32px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  text-decoration: none;
+  font-size: 14px;
 }
 
 .provider-switch button:focus {
@@ -400,5 +420,9 @@ select:focus {
   .account-row {
     display: grid;
     justify-items: start;
+  }
+
+  .account-actions {
+    justify-content: flex-start;
   }
 }

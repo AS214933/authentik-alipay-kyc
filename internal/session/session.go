@@ -14,6 +14,7 @@ const (
 	DisplayNameKey    = "display_name"
 	OIDCStateKey      = "oidc_state"
 	OIDCNonceKey      = "oidc_nonce"
+	ReturnToKey       = "return_to"
 	KYCStateKey       = "kyc_state"
 	CertifyIDKey      = "certify_id"
 	KYCProviderKey    = "kyc_provider"
@@ -22,8 +23,6 @@ const (
 	PendingNameKey    = "pending_name"
 	PendingIDHashKey  = "pending_id_hash"
 	PendingLast4Key   = "pending_last4"
-	AdminKey          = "admin"
-	AdminCSRFKey      = "admin_csrf"
 )
 
 type Store struct {
