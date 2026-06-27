@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,15 +36,17 @@ func (fakeOIDC) Exchange(context.Context, string, string) (oidc.Claims, error) {
 }
 
 type fakeAuthentik struct {
-	user authentik.User
-	attr authentik.KYCAttribute
+	user   authentik.User
+	userID string
+	attr   authentik.KYCAttribute
 }
 
 func (f *fakeAuthentik) GetUser(context.Context, string) (authentik.User, error) {
 	return f.user, nil
 }
 
-func (f *fakeAuthentik) MarkVerified(_ context.Context, _ string, attr authentik.KYCAttribute) error {
+func (f *fakeAuthentik) MarkVerified(_ context.Context, userID string, attr authentik.KYCAttribute) error {
+	f.userID = userID
 	f.attr = attr
 	if f.user.Attributes == nil {
 		f.user.Attributes = map[string]interface{}{}
@@ -512,7 +515,7 @@ func TestAliyunPendingKYCExpiresAfterThirtyMinutes(t *testing.T) {
 	}
 }
 
-func TestStartingNewProviderClearsPreviousPending(t *testing.T) {
+func TestStartingNewKYCLeavesPreviousPendingAvailable(t *testing.T) {
 	cfg := testConfig()
 	cfg.Aliyun.Enabled = true
 	aliyunClient := &fakeAliyun{passed: "T"}
@@ -563,11 +566,11 @@ func TestStartingNewProviderClearsPreviousPending(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("aliyun start status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if _, ok := srv.pendingKYC(first.State); ok {
-		t.Fatalf("old alipay pending state %q was not cleared", first.State)
+	if _, ok := srv.pendingKYC(first.State); !ok {
+		t.Fatalf("old alipay pending state %q was not retained", first.State)
 	}
 	srv.checkPendingKYC(context.Background())
-	if alipayClient.calls != 0 {
+	if alipayClient.calls != 1 {
 		t.Fatalf("old alipay pending was polled %d times", alipayClient.calls)
 	}
 }
@@ -1411,7 +1414,7 @@ func TestAdminImportWritesPIIAndAuthentikWithoutStats(t *testing.T) {
 	}
 }
 
-func TestAdminImportCanWriteUnverifiedAttribute(t *testing.T) {
+func TestAdminImportCreatesKYCInviteWhenRequired(t *testing.T) {
 	cfg := testConfig()
 	cfg.Admin.Enabled = true
 	cfg.Admin.Password = "admin-secret"
@@ -1437,7 +1440,7 @@ func TestAdminImportCanWriteUnverifiedAttribute(t *testing.T) {
 	admin := adminSession(t, handler, "admin-secret")
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"李四","id_number":"440524188001010014","verified":false}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"李四","id_number":"440524188001010014","requires_kyc":true}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-CSRF-Token", admin.csrfToken)
 	for _, cookie := range admin.cookies {
@@ -1447,8 +1450,166 @@ func TestAdminImportCanWriteUnverifiedAttribute(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin import status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if ak.attr.Verified || ak.attr.VerifiedAt != "" || ak.attr.Channel != "admin" {
-		t.Fatalf("unexpected unverified admin attr: %+v", ak.attr)
+	var body struct {
+		RequiresKYC bool   `json:"requires_kyc"`
+		InviteToken string `json:"invite_token"`
+		InviteURL   string `json:"invite_url"`
+		NameMasked  string `json:"name_masked"`
+		IDLast4     string `json:"id_last4"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.RequiresKYC || body.InviteToken == "" || !strings.Contains(body.InviteURL, "invite=") {
+		t.Fatalf("unexpected invite body: %+v", body)
+	}
+	if body.NameMasked != "*四" || body.IDLast4 != "0014" {
+		t.Fatalf("unexpected invite identity summary: %+v", body)
+	}
+	if ak.attr.Channel != "" {
+		t.Fatalf("admin invite should not write authentik attr: %+v", ak.attr)
+	}
+}
+
+func TestAdminKYCInviteCanStartWithoutLoginAndWritesTargetUser(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.Password = "admin-secret"
+	ak := &fakeAuthentik{user: authentik.User{
+		ID:         5,
+		Username:   "bob",
+		Attributes: map[string]interface{}{},
+	}}
+	piiStore := &fakePIIStore{}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: ak,
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		PII:       piiStore,
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	admin := adminSession(t, handler, "admin-secret")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"李四","id_number":"440524188001010014","requires_kyc":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", admin.csrfToken)
+	for _, cookie := range admin.cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin import status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var inviteResp struct {
+		InviteToken string `json:"invite_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &inviteResp); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"invite_token":"`+inviteResp.InviteToken+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("invite start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var startResp struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &startResp); err != nil {
+		t.Fatal(err)
+	}
+	cookies := rec.Result().Cookies()
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/confirm", strings.NewReader(`{"state":"`+startResp.State+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("invite confirm status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if ak.userID != "5" || !ak.attr.Verified || ak.attr.Channel != ProviderAlipay || ak.attr.IDLast4 != "0014" {
+		t.Fatalf("unexpected invite authentik write: user=%q attr=%+v", ak.userID, ak.attr)
+	}
+	if len(piiStore.entries) != 1 || piiStore.entries[0].UserID != "5" || piiStore.entries[0].IDNumber != "440524188001010014" {
+		t.Fatalf("unexpected invite pii entries: %+v", piiStore.entries)
+	}
+}
+
+func TestAdminKYCInviteReturnRedirectsWithoutLogin(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.Password = "admin-secret"
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	admin := adminSession(t, handler, "admin-secret")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"李四","id_number":"440524188001010014","requires_kyc":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", admin.csrfToken)
+	for _, cookie := range admin.cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin import status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var inviteResp struct {
+		InviteToken string `json:"invite_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &inviteResp); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"invite_token":"`+inviteResp.InviteToken+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("invite start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var startResp struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &startResp); err != nil {
+		t.Fatal(err)
+	}
+	cookies := rec.Result().Cookies()
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/verify/callback?state="+url.QueryEscape(startResp.State), nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("return status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if location := rec.Header().Get("Location"); location != cfg.PublicURL+"/?state="+url.QueryEscape(startResp.State) {
+		t.Fatalf("return location = %q", location)
 	}
 }
 

@@ -31,8 +31,9 @@ const (
 	ProviderAlipay = "alipay"
 	ProviderAliyun = "aliyun"
 
-	AlipayPendingTTL = 23 * time.Hour
-	AliyunPendingTTL = 30 * time.Minute
+	AlipayPendingTTL  = 23 * time.Hour
+	AliyunPendingTTL  = 30 * time.Minute
+	AdminKYCInviteTTL = 24 * time.Hour
 )
 
 type OIDCClient interface {
@@ -95,6 +96,7 @@ type Server struct {
 	settleMu  sync.Mutex
 	pending   map[string]pendingKYC
 	terminal  map[string]terminalKYC
+	invites   map[string]kycInvite
 }
 
 type errorResponse struct {
@@ -153,6 +155,16 @@ type terminalKYC struct {
 	ExpiresAt time.Time
 }
 
+type kycInvite struct {
+	Token      string
+	UserID     string
+	Name       string
+	IDNumber   string
+	NameMasked string
+	IDLast4    string
+	ExpiresAt  time.Time
+}
+
 func New(deps Dependencies) *Server {
 	logger := deps.Logger
 	if logger == nil {
@@ -177,6 +189,7 @@ func New(deps Dependencies) *Server {
 		sessions:  session.New(deps.Config.Session),
 		pending:   map[string]pendingKYC{},
 		terminal:  map[string]terminalKYC{},
+		invites:   map[string]kycInvite{},
 	}
 }
 
@@ -210,6 +223,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/login", s.adminLogin)
 	mux.HandleFunc("POST /api/admin/logout", s.adminLogout)
 	mux.HandleFunc("POST /api/admin/import", s.adminImport)
+	mux.HandleFunc("GET /api/kyc/invite", s.kycInvite)
 	mux.HandleFunc("POST /api/kyc/start", s.startKYC)
 	mux.HandleFunc("POST /api/kyc/confirm", s.confirmKYC)
 	mux.HandleFunc("POST /api/alipay/notify", s.alipayNotify)
@@ -324,6 +338,14 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		response["kyc"] = attr
 		response["verified"] = kycAttributeVerified(attr)
 	}
+	if invite, ok := s.kycInviteByUserID(userID); ok {
+		response["kyc_invite"] = map[string]interface{}{
+			"token":       invite.Token,
+			"name_masked": invite.NameMasked,
+			"id_last4":    invite.IDLast4,
+			"expires_at":  invite.ExpiresAt.Format(time.RFC3339),
+		}
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -419,10 +441,11 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		UserID   string `json:"user_id"`
-		Name     string `json:"name"`
-		IDNumber string `json:"id_number"`
-		Verified *bool  `json:"verified"`
+		UserID      string `json:"user_id"`
+		Name        string `json:"name"`
+		IDNumber    string `json:"id_number"`
+		RequiresKYC *bool  `json:"requires_kyc"`
+		Verified    *bool  `json:"verified"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
@@ -443,9 +466,28 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "id_number must be a 15 or 18 character identity card number")
 		return
 	}
-	verified := true
-	if req.Verified != nil {
-		verified = *req.Verified
+	requiresKYC := true
+	if req.RequiresKYC != nil {
+		requiresKYC = *req.RequiresKYC
+	} else if req.Verified != nil {
+		requiresKYC = !*req.Verified
+	}
+	if requiresKYC {
+		invite, err := s.createKYCInvite(userID, name, idNumber)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create verification invite")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"requires_kyc": true,
+			"user_id":      userID,
+			"invite_token": invite.Token,
+			"invite_url":   s.kycInviteURL(invite.Token),
+			"expires_at":   invite.ExpiresAt.Format(time.RFC3339),
+			"name_masked":  invite.NameMasked,
+			"id_last4":     invite.IDLast4,
+		})
+		return
 	}
 	importToken, err := oidc.RandomToken()
 	if err != nil {
@@ -461,7 +503,7 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 		Name:         name,
 		IDNumber:     idNumber,
 		Channel:      "admin",
-		Verified:     verified,
+		Verified:     true,
 	})
 	if err != nil {
 		s.logger.Warn("failed to import admin verification", "user_id", userID, "error", err)
@@ -469,27 +511,64 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"imported": true,
-		"user_id":  userID,
-		"kyc":      attr,
+		"imported":     true,
+		"requires_kyc": false,
+		"user_id":      userID,
+		"kyc":          attr,
+	})
+}
+
+func (s *Server) kycInvite(w http.ResponseWriter, r *http.Request) {
+	invite, ok := s.kycInviteByToken(r.URL.Query().Get("token"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "verification invite is invalid or expired")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"valid":          true,
+		"name_masked":    invite.NameMasked,
+		"id_last4":       invite.IDLast4,
+		"expires_at":     invite.ExpiresAt.Format(time.RFC3339),
+		"providers":      s.enabledProviders(),
+		"qr_notice_html": s.cfg.QRNoticeHTML,
 	})
 }
 
 func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
-	userID, ok := s.currentUserID(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"login_url": s.cfg.PublicURL + "/auth/login"})
-		return
-	}
 	var req struct {
 		Name           string `json:"name"`
 		IDNumber       string `json:"id_number"`
 		Provider       string `json:"provider"`
 		MetaInfo       string `json:"meta_info"`
 		CertifyURLType string `json:"certify_url_type"`
+		InviteToken    string `json:"invite_token"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	sess, err := s.sessions.Get(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid session")
+		return
+	}
+	userID := stringValue(sess.Values[session.UserIDKey])
+	username := stringValue(sess.Values[session.UsernameKey])
+	inviteToken := strings.TrimSpace(req.InviteToken)
+	inviteMode := false
+	if inviteToken != "" {
+		invite, ok := s.kycInviteByToken(inviteToken)
+		if !ok {
+			writeError(w, http.StatusNotFound, "verification invite is invalid or expired")
+			return
+		}
+		userID = invite.UserID
+		username = ""
+		req.Name = invite.Name
+		req.IDNumber = invite.IDNumber
+		inviteMode = true
+	} else if userID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"login_url": s.cfg.PublicURL + "/auth/login"})
 		return
 	}
 	req.Name = strings.TrimSpace(req.Name)
@@ -500,11 +579,6 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(idNumber) != 15 && len(idNumber) != 18 {
 		writeError(w, http.StatusBadRequest, "id_number must be a 15 or 18 character identity card number")
-		return
-	}
-	sess, err := s.sessions.Get(r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid session")
 		return
 	}
 	s.recordTotal()
@@ -536,7 +610,6 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "certify_url_type must be WEB or H5 for aliyun verification")
 		return
 	}
-	s.clearExistingPendingFromSession(sess.Values)
 	outerOrderNo := "ak" + time.Now().UTC().Format("20060102150405") + orderToken[:16]
 	idHash := identitycrypto.IDHash(idNumber, s.cfg.HashPepper)
 
@@ -558,7 +631,7 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 	if s.pii != nil {
 		if err := s.pii.Append(piistore.Entry{
 			UserID:       userID,
-			Username:     stringValue(sess.Values[session.UsernameKey]),
+			Username:     username,
 			State:        state,
 			Provider:     provider,
 			CertifyID:    startResp.CertifyID,
@@ -588,6 +661,7 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		session.KYCStateKey:       state,
 		session.CertifyIDKey:      startResp.CertifyID,
 		session.KYCProviderKey:    provider,
+		session.PendingUserIDKey:  userID,
 		session.PendingExpiresKey: pending.ExpiresAt.Format(time.RFC3339),
 		session.PendingNameKey:    pending.NameMasked,
 		session.PendingIDHashKey:  pending.IDHash,
@@ -598,6 +672,9 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.storePendingKYC(pending)
+	if inviteMode {
+		s.consumeKYCInvite(inviteToken)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"provider":       provider,
@@ -612,11 +689,6 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) confirmKYC(w http.ResponseWriter, r *http.Request) {
-	userID, ok := s.currentUserID(r)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"login_url": s.cfg.PublicURL + "/auth/login"})
-		return
-	}
 	var req struct {
 		State string `json:"state"`
 	}
@@ -630,6 +702,15 @@ func (s *Server) confirmKYC(w http.ResponseWriter, r *http.Request) {
 	sess, err := s.sessions.Get(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid session")
+		return
+	}
+	userID := stringValue(sess.Values[session.UserIDKey])
+	pendingUserID := stringValue(sess.Values[session.PendingUserIDKey])
+	if pendingUserID != "" {
+		userID = pendingUserID
+	}
+	if userID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"login_url": s.cfg.PublicURL + "/auth/login"})
 		return
 	}
 	expectedState, _ := sess.Values[session.KYCStateKey].(string)
@@ -712,7 +793,7 @@ func (s *Server) alipayNotify(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) alipayReturn(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
-	if _, ok := s.currentUserID(r); ok && state != "" {
+	if s.hasKYCSession(r, state) {
 		http.Redirect(w, r, s.cfg.PublicURL+"/?state="+url.QueryEscape(state), http.StatusFound)
 		return
 	}
@@ -790,6 +871,22 @@ func (s *Server) currentUserID(r *http.Request) (string, bool) {
 	}
 	userID, _ := sess.Values[session.UserIDKey].(string)
 	return userID, userID != ""
+}
+
+func (s *Server) hasKYCSession(r *http.Request, state string) bool {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return false
+	}
+	sess, err := s.sessions.Get(r)
+	if err != nil {
+		return false
+	}
+	expectedState := stringValue(sess.Values[session.KYCStateKey])
+	if expectedState != "" && expectedState != state {
+		return false
+	}
+	return stringValue(sess.Values[session.UserIDKey]) != "" || stringValue(sess.Values[session.PendingUserIDKey]) != ""
 }
 
 func (s *Server) startProviderKYC(ctx context.Context, provider string, input kycStartInput) (kycStartResult, error) {
@@ -1092,6 +1189,91 @@ func (s *Server) pendingKYCFromSession(values map[interface{}]interface{}, state
 	return pending, true
 }
 
+func (s *Server) createKYCInvite(userID, name, idNumber string) (kycInvite, error) {
+	token, err := oidc.RandomToken()
+	if err != nil {
+		return kycInvite{}, err
+	}
+	invite := kycInvite{
+		Token:      token,
+		UserID:     strings.TrimSpace(userID),
+		Name:       strings.TrimSpace(name),
+		IDNumber:   identitycrypto.NormalizeIDNumber(idNumber),
+		NameMasked: identitycrypto.MaskChineseName(name),
+		IDLast4:    identitycrypto.Last4(idNumber),
+		ExpiresAt:  time.Now().UTC().Add(AdminKYCInviteTTL),
+	}
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	now := time.Now().UTC()
+	for token, existing := range s.invites {
+		if now.After(existing.ExpiresAt) || existing.UserID == invite.UserID {
+			delete(s.invites, token)
+		}
+	}
+	s.invites[token] = invite
+	return invite, nil
+}
+
+func (s *Server) kycInviteByToken(token string) (kycInvite, bool) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return kycInvite{}, false
+	}
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	invite, ok := s.invites[token]
+	if !ok {
+		return kycInvite{}, false
+	}
+	if time.Now().UTC().After(invite.ExpiresAt) {
+		delete(s.invites, token)
+		return kycInvite{}, false
+	}
+	return invite, true
+}
+
+func (s *Server) kycInviteByUserID(userID string) (kycInvite, bool) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return kycInvite{}, false
+	}
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	now := time.Now().UTC()
+	for token, invite := range s.invites {
+		if now.After(invite.ExpiresAt) {
+			delete(s.invites, token)
+			continue
+		}
+		if invite.UserID == userID {
+			return invite, true
+		}
+	}
+	return kycInvite{}, false
+}
+
+func (s *Server) consumeKYCInvite(token string) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return
+	}
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	delete(s.invites, token)
+}
+
+func (s *Server) kycInviteURL(token string) string {
+	u, err := url.Parse(s.cfg.PublicURL)
+	if err != nil {
+		return s.cfg.PublicURL + "/?invite=" + url.QueryEscape(token)
+	}
+	u.Path = "/"
+	u.RawQuery = url.Values{"invite": []string{token}}.Encode()
+	u.Fragment = ""
+	return u.String()
+}
+
 func (s *Server) terminalKYC(state string) (terminalKYC, bool) {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
@@ -1200,6 +1382,7 @@ func (s *Server) clearPendingKYC(r *http.Request, w http.ResponseWriter) error {
 		session.KYCStateKey:       nil,
 		session.CertifyIDKey:      nil,
 		session.KYCProviderKey:    nil,
+		session.PendingUserIDKey:  nil,
 		session.PendingExpiresKey: nil,
 		session.PendingNameKey:    nil,
 		session.PendingIDHashKey:  nil,

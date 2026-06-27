@@ -17,6 +17,7 @@ const (
 	KYCStateKey       = "kyc_state"
 	CertifyIDKey      = "certify_id"
 	KYCProviderKey    = "kyc_provider"
+	PendingUserIDKey  = "pending_user_id"
 	PendingExpiresKey = "pending_expires"
 	PendingNameKey    = "pending_name"
 	PendingIDHashKey  = "pending_id_hash"

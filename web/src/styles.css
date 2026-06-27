@@ -308,6 +308,31 @@ select:focus {
   margin-top: 18px;
 }
 
+.admin-invite,
+.preset-box {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid #d7dde4;
+  border-radius: 8px;
+  background: #f8fafb;
+}
+
+.admin-invite {
+  justify-items: center;
+  margin-top: 18px;
+}
+
+.admin-link {
+  width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.admin-link a {
+  color: #0f6b56;
+  font-weight: 700;
+}
+
 .callback {
   margin-top: 18px;
   min-height: 42px;

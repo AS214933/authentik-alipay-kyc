@@ -164,7 +164,11 @@ scripts/decrypt-pii-sm2.sh ./pii-private.pem ./alipay-kyc-data/kyc_pii/<id_hash>
 
 Manual admin import:
 
-Set `ADMIN_ENABLED=true` and `ADMIN_PASSWORD` to enable `/admin/`. The admin page can import a user by authentik user ID, name, ID number, and a verified yes/no switch. Manual imports write the same local encrypted PII record and authentik attribute shape as the Alipay flow, using `channel: "admin"`, but do not increment the Alipay verification counters.
+Set `ADMIN_ENABLED=true` and `ADMIN_PASSWORD` to enable `/admin/`. The admin page can import a user by authentik user ID, name, ID number, and a `需要 KYC 认证` switch.
+
+When `需要 KYC 认证` is `否`, the service writes the same local encrypted PII record and authentik attribute shape as the normal flow immediately, using `channel: "admin"`, without incrementing verification counters.
+
+When `需要 KYC 认证` is `是`, the service creates a 24-hour shortcut KYC link and QR code for the administrator. The user can open that link without logging in and verify against the administrator-provided identity information, or log in normally and use the prefilled identity prompt shown on the standard KYC page. Logged-in users may cancel the prefilled identity and enter their own information. Once a provider certification URL is generated, that pending verification keeps the identity information used at generation time, so later edits or a new start do not change the old pending result.
 
 Stats API:
 

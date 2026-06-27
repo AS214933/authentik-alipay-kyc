@@ -43,10 +43,10 @@
                   <input v-model.trim="adminImportForm.user_id" name="user_id" autocomplete="off" required />
                 </label>
                 <label>
-                  <span>认证状态</span>
-                  <select v-model="adminImportForm.verified" name="verified">
-                    <option :value="true">验证是</option>
-                    <option :value="false">验证否</option>
+                  <span>需要 KYC 认证</span>
+                  <select v-model="adminImportForm.requiresKyc" name="requires_kyc">
+                    <option :value="true">是</option>
+                    <option :value="false">否</option>
                   </select>
                 </label>
               </div>
@@ -72,14 +72,24 @@
               </button>
             </form>
 
+            <div v-if="admin.invite" class="admin-invite">
+              <div class="qr-frame">
+                <img :src="admin.invite.qrCode" alt="快捷 KYC 链接二维码" />
+              </div>
+              <div class="admin-link">
+                <span class="label">快捷 KYC 链接</span>
+                <a :href="admin.invite.url" target="_blank" rel="noreferrer">{{ admin.invite.url }}</a>
+              </div>
+            </div>
+
             <div v-if="admin.result" class="result-grid admin-result">
               <div>
                 <span class="label">用户 ID</span>
                 <strong>{{ admin.result.user_id }}</strong>
               </div>
               <div>
-                <span class="label">状态</span>
-                <strong>{{ admin.result.verified ? '验证是' : '验证否' }}</strong>
+                <span class="label">处理方式</span>
+                <strong>{{ admin.result.requires_kyc ? '需要 KYC' : '跳过 KYC' }}</strong>
               </div>
               <div>
                 <span class="label">姓名</span>
@@ -113,7 +123,7 @@
         </div>
 
         <template v-else>
-          <div v-if="!state.authenticated" class="empty">
+          <div v-if="!canUseKycPage" class="empty">
             <ShieldCheck :size="38" />
             <h2>需要登录</h2>
             <p>请先通过 Authentik 登录后继续实名认证。</p>
@@ -124,7 +134,7 @@
           </div>
 
           <template v-else>
-            <div class="account-row">
+            <div v-if="state.authenticated" class="account-row">
               <div>
                 <span class="label">当前用户</span>
                 <strong>{{ state.user.username || state.user.display_name || state.user.id }}</strong>
@@ -176,20 +186,29 @@
                   <CircleCheck v-else :size="18" />
                   我已完成，检查结果
                 </button>
-                <button class="secondary" type="button" :disabled="state.confirming" @click="resetKyc">
+                <button v-if="canResetPending" class="secondary" type="button" :disabled="state.confirming" @click="resetKyc">
                   重新填写
                 </button>
               </div>
             </div>
 
-            <form v-else class="form" @submit.prevent="startKyc">
+            <form v-else-if="state.authenticated || state.invite.active" class="form" @submit.prevent="startKyc">
               <p v-if="canSwitchProvider" class="provider-switch">
                 {{ providerSwitchPrefix }}
                 <button type="button" @click="switchProvider">{{ providerSwitchText }}</button>
               </p>
+              <div v-if="state.invite.active" class="preset-box">
+                <div>
+                  <span class="label">预设身份信息</span>
+                  <strong>{{ state.invite.nameMasked }} / {{ state.invite.idLast4 }}</strong>
+                </div>
+                <button v-if="state.authenticated" class="secondary" type="button" @click="cancelInvite">
+                  取消使用，重新填写
+                </button>
+              </div>
               <label>
                 <span>姓名</span>
-                <input v-model.trim="form.name" name="name" autocomplete="name" required maxlength="64" />
+                <input v-model.trim="form.name" name="name" autocomplete="name" required maxlength="64" :disabled="state.invite.active" />
               </label>
               <label>
                 <span>身份证号</span>
@@ -200,6 +219,7 @@
                   inputmode="text"
                   required
                   maxlength="18"
+                  :disabled="state.invite.active"
                 />
               </label>
               <button class="primary" type="submit" :disabled="state.busy">
@@ -259,6 +279,13 @@ const state = reactive({
   certifyUrl: '',
   mobile: isMobileBrowser(),
   pendingState: '',
+  invite: {
+    token: '',
+    active: false,
+    started: false,
+    nameMasked: '',
+    idLast4: ''
+  },
   error: ''
 })
 
@@ -274,6 +301,7 @@ const admin = reactive({
   authenticated: false,
   csrfToken: '',
   result: null,
+  invite: null,
   error: '',
   success: ''
 })
@@ -286,10 +314,12 @@ const adminImportForm = reactive({
   user_id: '',
   name: '',
   id_number: '',
-  verified: true
+  requiresKyc: true
 })
 
-const callbackState = ref(new URLSearchParams(window.location.search).get('state') || '')
+const params = new URLSearchParams(window.location.search)
+const callbackState = ref(params.get('state') || '')
+const inviteToken = ref(params.get('invite') || '')
 const callbackMessage = computed(() => {
   if (state.confirming) return `正在确认${providerDisplayName(state.pendingProvider || state.provider)}认证结果`
   if (state.verified) return '认证已完成并写回 Authentik'
@@ -297,6 +327,8 @@ const callbackMessage = computed(() => {
 })
 
 const canSwitchProvider = computed(() => state.providers.includes('alipay') && state.providers.includes('aliyun'))
+const canUseKycPage = computed(() => state.authenticated || state.invite.active || state.verified || Boolean(callbackState.value))
+const canResetPending = computed(() => state.authenticated || !state.invite.active || !state.invite.started)
 const providerSwitchPrefix = computed(() =>
   state.provider === 'aliyun' ? '想使用支付宝？' : '支付宝无法使用？'
 )
@@ -319,8 +351,11 @@ onMounted(async () => {
     await loadAdminStatus()
     return
   }
+  if (inviteToken.value) {
+    await loadInvite()
+  }
   await loadMe()
-  if (state.authenticated && callbackState.value && !state.verified) {
+  if (canUseKycPage.value && callbackState.value && !state.verified) {
     await confirmKyc(callbackState.value)
   }
 })
@@ -355,6 +390,16 @@ async function loadMe() {
     state.verified = Boolean(data.verified)
     state.kyc = data.kyc || null
     state.qrNoticeHtml = data.qr_notice_html || ''
+    if (!state.invite.active && data.kyc_invite?.token) {
+      inviteToken.value = data.kyc_invite.token
+      state.invite = {
+        token: data.kyc_invite.token,
+        active: true,
+        started: false,
+        nameMasked: data.kyc_invite.name_masked || '',
+        idLast4: data.kyc_invite.id_last4 || ''
+      }
+    }
     state.providers = Array.isArray(data.providers) && data.providers.length ? data.providers : ['alipay']
     if (!state.providers.includes(state.provider)) {
       state.provider = state.providers[0] || 'alipay'
@@ -363,11 +408,35 @@ async function loadMe() {
     if (err.status === 401) {
       state.authenticated = false
       state.loginUrl = err.body?.login_url || '/auth/login'
+      if (state.invite.active) {
+        return
+      }
     } else {
       state.error = err.message
     }
   } finally {
     state.loading = false
+  }
+}
+
+async function loadInvite() {
+  try {
+    const data = await request(`/api/kyc/invite?token=${encodeURIComponent(inviteToken.value)}`)
+    state.invite = {
+      token: inviteToken.value,
+      active: true,
+      started: false,
+      nameMasked: data.name_masked || '',
+      idLast4: data.id_last4 || ''
+    }
+    state.qrNoticeHtml = data.qr_notice_html || state.qrNoticeHtml || ''
+    state.providers = Array.isArray(data.providers) && data.providers.length ? data.providers : state.providers
+    if (!state.providers.includes(state.provider)) {
+      state.provider = state.providers[0] || 'alipay'
+    }
+  } catch (err) {
+    state.invite.active = false
+    state.error = err.status === 404 ? '快捷 KYC 链接无效或已过期。' : err.message
   }
 }
 
@@ -429,11 +498,28 @@ async function adminImport() {
         user_id: adminImportForm.user_id,
         name: adminImportForm.name,
         id_number: adminImportForm.id_number,
-        verified: adminImportForm.verified
+        requires_kyc: adminImportForm.requiresKyc
       })
     })
-    admin.result = data.kyc ? { ...data.kyc, user_id: data.user_id } : null
-    admin.success = '已写入本地加密记录并回传 Authentik'
+    admin.result = data.kyc
+      ? { ...data.kyc, user_id: data.user_id, requires_kyc: false }
+      : {
+          user_id: data.user_id,
+          requires_kyc: true,
+          name_masked: data.name_masked || '',
+          id_last4: data.id_last4 || ''
+        }
+    admin.invite = data.invite_url
+      ? {
+          url: data.invite_url,
+          qrCode: await QRCode.toDataURL(data.invite_url, {
+            errorCorrectionLevel: 'M',
+            margin: 1,
+            scale: 8
+          })
+        }
+      : null
+    admin.success = data.requires_kyc ? '已生成快捷 KYC 链接' : '已写入本地加密记录并回传 Authentik'
   } catch (err) {
     if (err.status === 401) {
       admin.authenticated = false
@@ -469,11 +555,12 @@ async function startKyc() {
     const data = await request('/api/kyc/start', {
       method: 'POST',
       body: JSON.stringify({
-        name: form.name,
-        id_number: form.id_number,
+        name: state.invite.active ? '' : form.name,
+        id_number: state.invite.active ? '' : form.id_number,
         provider,
         meta_info: metaInfo,
-        certify_url_type: certifyUrlType
+        certify_url_type: certifyUrlType,
+        invite_token: state.invite.active && !state.invite.started ? state.invite.token : ''
       })
     })
     state.pendingState = data.state || ''
@@ -487,6 +574,12 @@ async function startKyc() {
       margin: 1,
       scale: 8
     })
+    if (state.invite.active) {
+      state.invite.started = true
+      const url = new URL(window.location.href)
+      url.searchParams.delete('invite')
+      window.history.replaceState({}, '', url.pathname + url.search + url.hash)
+    }
     openLaunchUrlOnMobile()
   } catch (err) {
     state.error = state.provider === 'aliyun' && err.message === 'aliyun_meta_failed'
@@ -538,6 +631,25 @@ function resetKyc() {
   state.pendingState = ''
   state.pendingProvider = ''
   state.error = ''
+  if (state.invite.started) {
+    cancelInvite()
+  }
+}
+
+function cancelInvite() {
+  state.invite = {
+    token: '',
+    active: false,
+    started: false,
+    nameMasked: '',
+    idLast4: ''
+  }
+  inviteToken.value = ''
+  form.name = ''
+  form.id_number = ''
+  const url = new URL(window.location.href)
+  url.searchParams.delete('invite')
+  window.history.replaceState({}, '', url.pathname + url.search + url.hash)
 }
 
 function openLaunchUrl() {
