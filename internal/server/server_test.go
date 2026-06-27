@@ -643,6 +643,117 @@ func TestMeReturnsEnabledProviders(t *testing.T) {
 	}
 }
 
+func TestMeReturnsOnlyAliyunWhenAlipayDisabled(t *testing.T) {
+	cfg := testConfig()
+	cfg.Alipay.Enabled = false
+	cfg.Aliyun.Enabled = true
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Aliyun:    &fakeAliyun{passed: "T"},
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	for _, cookie := range userCookie(t, srv) {
+		req.AddCookie(cookie)
+	}
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("me status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Providers []string `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(body.Providers, ",") != "aliyun" {
+		t.Fatalf("providers = %+v, want aliyun", body.Providers)
+	}
+}
+
+func TestStartKYCDefaultsToAlipayWhenBothProvidersEnabled(t *testing.T) {
+	cfg := testConfig()
+	cfg.Aliyun.Enabled = true
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    &fakeAliyun{passed: "T"},
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"name":"张三","id_number":"11010519491231002X"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range userCookie(t, srv) {
+		req.AddCookie(cookie)
+	}
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Provider string `json:"provider"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Provider != ProviderAlipay {
+		t.Fatalf("provider = %q, want alipay", body.Provider)
+	}
+}
+
+func TestStartKYCDefaultsToAliyunWhenOnlyAliyunEnabled(t *testing.T) {
+	cfg := testConfig()
+	cfg.Alipay.Enabled = false
+	cfg.Aliyun.Enabled = true
+	aliyunClient := &fakeAliyun{passed: "T"}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Aliyun:    aliyunClient,
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"name":"张三","id_number":"11010519491231002X","meta_info":"{}","certify_url_type":"WEB"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range userCookie(t, srv) {
+		req.AddCookie(cookie)
+	}
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Provider string `json:"provider"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Provider != ProviderAliyun || aliyunClient.initializeCall != 1 {
+		t.Fatalf("provider = %q initializeCall=%d, want aliyun/1", body.Provider, aliyunClient.initializeCall)
+	}
+}
+
 func TestStartKYCReturnsQRNoticeHTML(t *testing.T) {
 	cfg := testConfig()
 	cfg.QRNoticeHTML = `<strong>请使用本人支付宝扫码。</strong>`
@@ -1421,6 +1532,7 @@ func testConfig() config.Config {
 			MergeExisting: true,
 		},
 		Alipay: config.AlipayConfig{
+			Enabled:   true,
 			BizCode:   "FACE",
 			CertType:  "IDENTITY_CARD",
 			ReturnURL: "https://kyc.example.com/verify/callback",

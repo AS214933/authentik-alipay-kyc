@@ -69,7 +69,7 @@ Configure the Alipay application for identity verification and set the return UR
 
 ## Aliyun ID Verification Setup
 
-Aliyun Financial-grade ID Verification can be enabled as a manual fallback channel. The frontend obtains `MetaInfo` from the Aliyun Web/H5 script for every start request, the server calls `InitFaceVerify`, and result confirmation uses `DescribeFaceVerify` with `ResultObject.Passed == "T"`.
+Aliyun Financial-grade ID Verification can be enabled as a manual fallback channel. When both Alipay and Aliyun are enabled, the user page starts with Alipay and shows a switch link for Aliyun. If only one provider is enabled, that provider is used directly. The frontend obtains `MetaInfo` from the Aliyun Web/H5 script for every start request, the server calls `InitFaceVerify`, and result confirmation uses `DescribeFaceVerify` with `ResultObject.Passed == "T"`.
 
 Enable it with `ALIYUN_KYC_ENABLED=true`, configure an AccessKey with permission to call CloudAuth APIs, and set `ALIYUN_SCENE_ID` to your financial-grade real-person verification scene ID. The default endpoints try Shanghai first and Beijing second:
 
@@ -107,10 +107,11 @@ Aliyun `CertifyId` and `CertifyUrl` are valid for 30 minutes and can only be sub
 | `AUTHENTIK_TOKEN` | yes | empty | authentik API token. |
 | `AUTHENTIK_USER_ID_CLAIM` | no | `ak_user_id` | OIDC claim used as authentik user pk. |
 | `AUTHENTIK_ATTRIBUTE_KEY` | no | `alipay_kyc` | User attribute key written by the service. |
+| `ALIPAY_KYC_ENABLED` | no | `true` | Enable Alipay KYC. If both Alipay and Aliyun are enabled, Alipay is the default provider. |
 | `ALIPAY_GATEWAY_URL` | no | `https://openapi.alipay.com/gateway.do` | Alipay OpenAPI gateway. |
-| `ALIPAY_APP_ID` | yes | empty | Alipay app ID. |
-| `ALIPAY_APP_PRIVATE_KEY` | yes | empty | RSA private key PEM, `\n` escapes are accepted. |
-| `ALIPAY_PUBLIC_KEY` | yes | empty | Alipay public key PEM. |
+| `ALIPAY_APP_ID` | when Alipay enabled | empty | Alipay app ID. |
+| `ALIPAY_APP_PRIVATE_KEY` | when Alipay enabled | empty | RSA private key PEM, `\n` escapes are accepted. |
+| `ALIPAY_PUBLIC_KEY` | when Alipay enabled | empty | Alipay public key PEM. |
 | `ALIPAY_BIZ_CODE` | no | `FACE` | Alipay identity verification scene code. |
 | `ALIPAY_CERT_TYPE` | no | `IDENTITY_CARD` | Alipay certificate type. |
 | `ALIPAY_RETURN_URL` | no | `${PUBLIC_URL}/verify/callback` | Browser return URL. |

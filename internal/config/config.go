@@ -54,6 +54,7 @@ type AuthentikConfig struct {
 }
 
 type AlipayConfig struct {
+	Enabled            bool
 	GatewayURL         string
 	AppID              string
 	AppPrivateKeyPEM   string
@@ -145,6 +146,7 @@ func Load() (Config, error) {
 			MergeExisting: boolEnv("AUTHENTIK_MERGE_EXISTING_ATTRIBUTES", true),
 		},
 		Alipay: AlipayConfig{
+			Enabled:            boolEnv("ALIPAY_KYC_ENABLED", true),
 			GatewayURL:         getenv("ALIPAY_GATEWAY_URL", "https://openapi.alipay.com/gateway.do"),
 			AppID:              getenv("ALIPAY_APP_ID", ""),
 			AppPrivateKeyPEM:   normalizePEM(getenv("ALIPAY_APP_PRIVATE_KEY", "")),
@@ -198,8 +200,11 @@ func Load() (Config, error) {
 	if cfg.Authentik.BaseURL == "" || cfg.Authentik.Token == "" {
 		return Config{}, errors.New("AUTHENTIK_BASE_URL and AUTHENTIK_TOKEN are required")
 	}
-	if cfg.Alipay.AppID == "" || cfg.Alipay.AppPrivateKeyPEM == "" || cfg.Alipay.AlipayPublicKeyPEM == "" {
-		return Config{}, errors.New("ALIPAY_APP_ID, ALIPAY_APP_PRIVATE_KEY, and ALIPAY_PUBLIC_KEY are required")
+	if !cfg.Alipay.Enabled && !cfg.Aliyun.Enabled {
+		return Config{}, errors.New("at least one KYC provider must be enabled")
+	}
+	if cfg.Alipay.Enabled && (cfg.Alipay.AppID == "" || cfg.Alipay.AppPrivateKeyPEM == "" || cfg.Alipay.AlipayPublicKeyPEM == "") {
+		return Config{}, errors.New("ALIPAY_APP_ID, ALIPAY_APP_PRIVATE_KEY, and ALIPAY_PUBLIC_KEY are required when ALIPAY_KYC_ENABLED is true")
 	}
 	if cfg.Aliyun.Enabled {
 		if cfg.Aliyun.AccessKeyID == "" || cfg.Aliyun.AccessKeySecret == "" || cfg.Aliyun.SceneID <= 0 {

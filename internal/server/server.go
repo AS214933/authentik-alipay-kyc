@@ -520,7 +520,7 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create order number")
 		return
 	}
-	provider := normalizeProvider(req.Provider)
+	provider := s.requestedProvider(req.Provider)
 	if !s.providerEnabled(provider) {
 		s.recordFailure()
 		writeError(w, http.StatusBadRequest, "unsupported verification provider")
@@ -878,11 +878,26 @@ func (s *Server) pendingTTLForProvider(provider string) time.Duration {
 }
 
 func (s *Server) enabledProviders() []string {
-	providers := []string{ProviderAlipay}
+	providers := []string{}
+	if s.cfg.Alipay.Enabled && s.alipay != nil {
+		providers = append(providers, ProviderAlipay)
+	}
 	if s.cfg.Aliyun.Enabled && s.aliyun != nil {
 		providers = append(providers, ProviderAliyun)
 	}
 	return providers
+}
+
+func (s *Server) requestedProvider(provider string) string {
+	provider = strings.TrimSpace(provider)
+	if provider != "" {
+		return normalizeProvider(provider)
+	}
+	enabled := s.enabledProviders()
+	if len(enabled) > 0 {
+		return enabled[0]
+	}
+	return ProviderAlipay
 }
 
 func (s *Server) providerEnabled(provider string) bool {

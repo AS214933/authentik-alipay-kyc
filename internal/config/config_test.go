@@ -115,6 +115,58 @@ func TestLoadDefaultsAlipayKYCTimeoutTo23Hours(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsAlipayKYCEnabled(t *testing.T) {
+	setRequiredEnv(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Alipay.Enabled {
+		t.Fatal("expected alipay kyc to be enabled by default")
+	}
+}
+
+func TestLoadRequiresAlipayConfigWhenEnabled(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ALIPAY_APP_ID", "")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "ALIPAY_APP_ID") {
+		t.Fatalf("Load error = %v, want alipay config required", err)
+	}
+}
+
+func TestLoadAllowsAlipayConfigMissingWhenDisabledAndAliyunEnabled(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ALIPAY_KYC_ENABLED", "false")
+	t.Setenv("ALIPAY_APP_ID", "")
+	t.Setenv("ALIPAY_APP_PRIVATE_KEY", "")
+	t.Setenv("ALIPAY_PUBLIC_KEY", "")
+	t.Setenv("ALIYUN_KYC_ENABLED", "true")
+	t.Setenv("ALIYUN_ACCESS_KEY_ID", "ak")
+	t.Setenv("ALIYUN_ACCESS_KEY_SECRET", "secret")
+	t.Setenv("ALIYUN_SCENE_ID", "1000000006")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Alipay.Enabled || !cfg.Aliyun.Enabled {
+		t.Fatalf("unexpected provider flags: alipay=%t aliyun=%t", cfg.Alipay.Enabled, cfg.Aliyun.Enabled)
+	}
+}
+
+func TestLoadRequiresAtLeastOneKYCProvider(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ALIPAY_KYC_ENABLED", "false")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "at least one KYC provider") {
+		t.Fatalf("Load error = %v, want provider requirement", err)
+	}
+}
+
 func TestLoadRequiresAliyunConfigWhenEnabled(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("ALIYUN_KYC_ENABLED", "true")

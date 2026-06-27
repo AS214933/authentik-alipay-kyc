@@ -52,6 +52,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	var alipayClient server.AlipayClient
+	if cfg.Alipay.Enabled {
+		alipayClient = alipay.NewClient(cfg.Alipay)
+	}
+
 	aliyunClient, err := aliyunkyc.NewClient(cfg.Aliyun)
 	if err != nil {
 		logger.Error("configure aliyun kyc", "error", err)
@@ -63,7 +68,7 @@ func main() {
 		Logger:     logger,
 		OIDC:       oidcClient,
 		Authentik:  authentik.NewClient(cfg.Authentik),
-		Alipay:     alipay.NewClient(cfg.Alipay),
+		Alipay:     alipayClient,
 		Aliyun:     aliyunClient,
 		Stats:      statsStore,
 		PII:        piiStore,
