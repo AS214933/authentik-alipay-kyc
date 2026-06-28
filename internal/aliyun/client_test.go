@@ -5,8 +5,10 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	cloudauth "github.com/alibabacloud-go/cloudauth-20190307/v4/client"
+	"github.com/example/authentik-alipay-kyc/internal/config"
 )
 
 type fakeSDK struct {
@@ -100,6 +102,21 @@ func TestQueryReturnsPassed(t *testing.T) {
 	}
 	if resp.Passed != "T" {
 		t.Fatalf("Passed = %q, want T", resp.Passed)
+	}
+}
+
+func TestNewOpenAPIConfigAppliesTimeout(t *testing.T) {
+	cfg := config.AliyunConfig{
+		AccessKeyID:     "ak",
+		AccessKeySecret: "secret",
+		Timeout:         10 * time.Second,
+	}
+	sdkConfig := newOpenAPIConfig(cfg, "cloudauth.cn-shanghai.aliyuncs.com")
+	if sdkConfig.ReadTimeout == nil || *sdkConfig.ReadTimeout != 10000 {
+		t.Fatalf("ReadTimeout = %v, want 10000", sdkConfig.ReadTimeout)
+	}
+	if sdkConfig.ConnectTimeout == nil || *sdkConfig.ConnectTimeout != 10000 {
+		t.Fatalf("ConnectTimeout = %v, want 10000", sdkConfig.ConnectTimeout)
 	}
 }
 

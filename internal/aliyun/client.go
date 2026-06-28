@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	cloudauth "github.com/alibabacloud-go/cloudauth-20190307/v4/client"
 	openapiutil "github.com/alibabacloud-go/darabonba-openapi/v2/utils"
@@ -68,11 +69,8 @@ func NewClient(cfg config.AliyunConfig) (*Client, error) {
 		if endpoint == "" {
 			continue
 		}
-		sdk, err := cloudauth.NewClient(&openapiutil.Config{
-			AccessKeyId:     &cfg.AccessKeyID,
-			AccessKeySecret: &cfg.AccessKeySecret,
-			Endpoint:        &endpoint,
-		})
+		sdkConfig := newOpenAPIConfig(cfg, endpoint)
+		sdk, err := cloudauth.NewClient(sdkConfig)
 		if err != nil {
 			return nil, fmt.Errorf("create aliyun cloudauth client for %s: %w", endpoint, err)
 		}
@@ -89,6 +87,23 @@ func NewClient(cfg config.AliyunConfig) (*Client, error) {
 		certType:    firstNonEmpty(cfg.CertType, "IDENTITY_CARD"),
 		returnURL:   cfg.ReturnURL,
 	}, nil
+}
+
+func newOpenAPIConfig(cfg config.AliyunConfig, endpoint string) *openapiutil.Config {
+	sdkConfig := &openapiutil.Config{
+		AccessKeyId:     &cfg.AccessKeyID,
+		AccessKeySecret: &cfg.AccessKeySecret,
+		Endpoint:        &endpoint,
+	}
+	if cfg.Timeout > 0 {
+		timeoutMS := int(cfg.Timeout / time.Millisecond)
+		if timeoutMS <= 0 {
+			timeoutMS = 1
+		}
+		sdkConfig.ReadTimeout = &timeoutMS
+		sdkConfig.ConnectTimeout = &timeoutMS
+	}
+	return sdkConfig
 }
 
 func (c *Client) Initialize(ctx context.Context, req InitializeRequest) (InitializeResponse, error) {
