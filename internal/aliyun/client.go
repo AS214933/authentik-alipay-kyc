@@ -133,6 +133,7 @@ func (c *Client) Initialize(ctx context.Context, req InitializeRequest) (Initial
 		MetaInfo:       stringPtr(req.MetaInfo),
 		CertifyUrlType: stringPtr(req.CertifyURLType),
 		Model:          stringPtr(c.model),
+		VideoEvidence:  stringPtr("true"),
 		UserId:         optionalStringPtr(req.UserID),
 		Ip:             optionalStringPtr(req.IP),
 	}

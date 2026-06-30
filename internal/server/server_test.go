@@ -1513,6 +1513,79 @@ func TestAdminImportCreatesKYCInviteWhenRequired(t *testing.T) {
 	}
 }
 
+func TestAdminKYCInviteCanSwitchProviderAfterStart(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.AllowedUsernames = []string{"admin"}
+	cfg.Aliyun.Enabled = true
+	aliyunClient := &fakeAliyun{certifyID: "ALIYUN123", certifyURL: "https://aliyun.example/certify", passed: "T"}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    aliyunClient,
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	admin := adminSession(t, handler, srv, "admin")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"5","name":"李四","id_number":"440524188001010014","requires_kyc":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", admin.csrfToken)
+	for _, cookie := range admin.cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin import status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var inviteResp struct {
+		InviteToken string `json:"invite_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &inviteResp); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"invite_token":"`+inviteResp.InviteToken+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("invite alipay start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok := srv.kycInviteByToken(inviteResp.InviteToken); !ok {
+		t.Fatal("invite was consumed before verification completed")
+	}
+	cookies := rec.Result().Cookies()
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"provider":"aliyun","meta_info":"{}","certify_url_type":"WEB","invite_token":"`+inviteResp.InviteToken+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("invite aliyun start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var startResp struct {
+		Provider string `json:"provider"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &startResp); err != nil {
+		t.Fatal(err)
+	}
+	if startResp.Provider != ProviderAliyun || aliyunClient.initializeCall != 1 {
+		t.Fatalf("unexpected aliyun invite start: body=%+v calls=%d", startResp, aliyunClient.initializeCall)
+	}
+}
+
 func TestAdminKYCInviteCanStartWithoutLoginAndWritesTargetUser(t *testing.T) {
 	cfg := testConfig()
 	cfg.Admin.Enabled = true
@@ -1586,6 +1659,9 @@ func TestAdminKYCInviteCanStartWithoutLoginAndWritesTargetUser(t *testing.T) {
 	}
 	if len(piiStore.entries) != 1 || piiStore.entries[0].UserID != "5" || piiStore.entries[0].IDNumber != "440524188001010014" {
 		t.Fatalf("unexpected invite pii entries: %+v", piiStore.entries)
+	}
+	if _, ok := srv.kycInviteByToken(inviteResp.InviteToken); ok {
+		t.Fatal("invite was not consumed after successful verification")
 	}
 }
 

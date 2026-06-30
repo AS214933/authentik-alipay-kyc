@@ -103,14 +103,15 @@ type errorResponse struct {
 }
 
 type pendingKYC struct {
-	State      string
-	Provider   string
-	CertifyID  string
-	UserID     string
-	NameMasked string
-	IDHash     string
-	IDLast4    string
-	ExpiresAt  time.Time
+	State       string
+	Provider    string
+	CertifyID   string
+	UserID      string
+	InviteToken string
+	NameMasked  string
+	IDHash      string
+	IDLast4     string
+	ExpiresAt   time.Time
 }
 
 type kycStartResult struct {
@@ -523,7 +524,6 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 	userID := stringValue(sess.Values[session.UserIDKey])
 	username := stringValue(sess.Values[session.UsernameKey])
 	inviteToken := strings.TrimSpace(req.InviteToken)
-	inviteMode := false
 	if inviteToken != "" {
 		invite, ok := s.kycInviteByToken(inviteToken)
 		if !ok {
@@ -534,7 +534,6 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		username = ""
 		req.Name = invite.Name
 		req.IDNumber = invite.IDNumber
-		inviteMode = true
 	} else if userID == "" {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"login_url": s.cfg.PublicURL + "/auth/login"})
 		return
@@ -615,14 +614,15 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	pending := pendingKYC{
-		State:      state,
-		Provider:   provider,
-		CertifyID:  startResp.CertifyID,
-		UserID:     userID,
-		NameMasked: identitycrypto.MaskChineseName(req.Name),
-		IDHash:     idHash,
-		IDLast4:    identitycrypto.Last4(idNumber),
-		ExpiresAt:  time.Now().UTC().Add(s.pendingTTLForProvider(provider)),
+		State:       state,
+		Provider:    provider,
+		CertifyID:   startResp.CertifyID,
+		UserID:      userID,
+		InviteToken: inviteToken,
+		NameMasked:  identitycrypto.MaskChineseName(req.Name),
+		IDHash:      idHash,
+		IDLast4:     identitycrypto.Last4(idNumber),
+		ExpiresAt:   time.Now().UTC().Add(s.pendingTTLForProvider(provider)),
 	}
 
 	if err := s.sessions.Save(r, w, map[interface{}]interface{}{
@@ -640,9 +640,6 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.storePendingKYC(pending)
-	if inviteMode {
-		s.consumeKYCInvite(inviteToken)
-	}
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"provider":       provider,
@@ -1323,6 +1320,7 @@ func (s *Server) settlePendingKYC(ctx context.Context, pending pendingKYC) (sett
 		return settleKYCResult{}, err
 	}
 	s.finishPendingKYC(pending.State, terminalKYC{Attribute: attr})
+	s.consumeKYCInvite(pending.InviteToken)
 	s.recordSuccess()
 	return settleKYCResult{Passed: true, Attribute: attr}, nil
 }

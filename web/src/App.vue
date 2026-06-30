@@ -611,7 +611,7 @@ async function confirmKyc(stateValue) {
   }
 }
 
-function resetKyc() {
+function resetKyc(options = {}) {
   state.qrCode = ''
   state.qrNoticeHtml = ''
   state.appLaunchUrl = ''
@@ -619,7 +619,9 @@ function resetKyc() {
   state.pendingState = ''
   state.pendingProvider = ''
   state.error = ''
-  if (state.invite.started) {
+  if (state.invite.started && options.preserveInvite) {
+    state.invite.started = false
+  } else if (state.invite.started) {
     cancelInvite()
   }
 }
@@ -654,7 +656,7 @@ function openLaunchUrlOnMobile() {
 
 function switchProvider() {
   state.provider = state.provider === 'aliyun' ? 'alipay' : 'aliyun'
-  resetKyc()
+  resetKyc({ preserveInvite: true })
 }
 
 async function getAliyunMetaInfo() {
