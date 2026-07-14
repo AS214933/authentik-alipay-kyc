@@ -1586,6 +1586,88 @@ func TestAdminKYCInviteCanSwitchProviderAfterStart(t *testing.T) {
 	}
 }
 
+func TestAdminKYCInviteOverridesLoggedInUserSubmittedIdentity(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.AllowedUsernames = []string{"admin"}
+	ak := &fakeAuthentik{user: authentik.User{
+		ID:         1,
+		Username:   "alice",
+		Attributes: map[string]interface{}{},
+	}}
+	piiStore := &fakePIIStore{}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: ak,
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		PII:       piiStore,
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	admin := adminSession(t, handler, srv, "admin")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/import", strings.NewReader(`{"user_id":"1","name":"李四","id_number":"440524188001010014","requires_kyc":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", admin.csrfToken)
+	for _, cookie := range admin.cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin import status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var inviteResp struct {
+		InviteToken string `json:"invite_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &inviteResp); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"name":"王五","id_number":"11010519491231002X"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range userCookie(t, srv) {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logged-in invite start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var startResp struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &startResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(piiStore.entries) != 1 || piiStore.entries[0].Name != "李四" || piiStore.entries[0].IDNumber != "440524188001010014" {
+		t.Fatalf("start should use invite identity, got pii entries: %+v", piiStore.entries)
+	}
+	cookies := rec.Result().Cookies()
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/confirm", strings.NewReader(`{"state":"`+startResp.State+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logged-in invite confirm status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if ak.userID != "1" || !ak.attr.Verified || ak.attr.IDLast4 != "0014" || ak.attr.NameMasked != "*四" {
+		t.Fatalf("unexpected invite authentik write: user=%q attr=%+v", ak.userID, ak.attr)
+	}
+	if _, ok := srv.kycInviteByToken(inviteResp.InviteToken); ok {
+		t.Fatal("invite was not consumed after logged-in verification")
+	}
+}
+
 func TestAdminKYCInviteCanStartWithoutLoginAndWritesTargetUser(t *testing.T) {
 	cfg := testConfig()
 	cfg.Admin.Enabled = true

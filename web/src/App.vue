@@ -212,9 +212,7 @@
                   <span class="label">预设身份信息</span>
                   <strong>{{ state.invite.nameMasked }} / {{ state.invite.idLast4 }}</strong>
                 </div>
-                <button v-if="state.authenticated" class="secondary" type="button" @click="cancelInvite">
-                  取消使用，重新填写
-                </button>
+                <p class="preset-hint">如信息有误，请联系管理员重新生成快捷认证链接</p>
               </div>
               <label>
                 <span>姓名</span>
@@ -338,7 +336,7 @@ const callbackMessage = computed(() => {
 
 const canSwitchProvider = computed(() => state.providers.includes('alipay') && state.providers.includes('aliyun'))
 const canUseKycPage = computed(() => state.authenticated || state.invite.active || state.verified || Boolean(callbackState.value))
-const canResetPending = computed(() => state.authenticated || !state.invite.active || !state.invite.started)
+const canResetPending = computed(() => !state.invite.active && state.authenticated)
 const providerSwitchPrefix = computed(() =>
   state.provider === 'aliyun' ? '想使用支付宝？' : '支付宝无法使用？'
 )
@@ -611,7 +609,7 @@ async function confirmKyc(stateValue) {
   }
 }
 
-function resetKyc(options = {}) {
+function resetKyc() {
   state.qrCode = ''
   state.qrNoticeHtml = ''
   state.appLaunchUrl = ''
@@ -619,27 +617,9 @@ function resetKyc(options = {}) {
   state.pendingState = ''
   state.pendingProvider = ''
   state.error = ''
-  if (state.invite.started && options.preserveInvite) {
+  if (state.invite.started) {
     state.invite.started = false
-  } else if (state.invite.started) {
-    cancelInvite()
   }
-}
-
-function cancelInvite() {
-  state.invite = {
-    token: '',
-    active: false,
-    started: false,
-    nameMasked: '',
-    idLast4: ''
-  }
-  inviteToken.value = ''
-  form.name = ''
-  form.id_number = ''
-  const url = new URL(window.location.href)
-  url.searchParams.delete('invite')
-  window.history.replaceState({}, '', url.pathname + url.search + url.hash)
 }
 
 function openLaunchUrl() {
@@ -656,7 +636,7 @@ function openLaunchUrlOnMobile() {
 
 function switchProvider() {
   state.provider = state.provider === 'aliyun' ? 'alipay' : 'aliyun'
-  resetKyc({ preserveInvite: true })
+  resetKyc()
 }
 
 async function getAliyunMetaInfo() {

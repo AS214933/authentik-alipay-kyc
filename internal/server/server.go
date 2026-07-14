@@ -537,6 +537,10 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 	} else if userID == "" {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"login_url": s.cfg.PublicURL + "/auth/login"})
 		return
+	} else if invite, ok := s.kycInviteByUserID(userID); ok {
+		inviteToken = invite.Token
+		req.Name = invite.Name
+		req.IDNumber = invite.IDNumber
 	}
 	req.Name = strings.TrimSpace(req.Name)
 	idNumber := identitycrypto.NormalizeIDNumber(req.IDNumber)
