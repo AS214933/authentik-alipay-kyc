@@ -23,6 +23,7 @@ services:
       AUTHENTIK_TOKEN: "${AUTHENTIK_TOKEN}"
       AUTHENTIK_USER_ID_CLAIM: "ak_user_id"
       AUTHENTIK_ATTRIBUTE_KEY: "alipay_kyc"
+      AUTHENTIK_VERIFIED_GROUP_UUID: "${AUTHENTIK_VERIFIED_GROUP_UUID:-}"
       ALIPAY_KYC_ENABLED: "${ALIPAY_KYC_ENABLED:-true}"
       ALIPAY_GATEWAY_URL: "https://openapi.alipay.com/gateway.do"
       ALIPAY_APP_ID: "${ALIPAY_APP_ID:-}"
