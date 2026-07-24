@@ -44,13 +44,14 @@ type OIDCConfig struct {
 }
 
 type AuthentikConfig struct {
-	BaseURL       string
-	Token         string
-	UserIDClaim   string
-	AttributeKey  string
-	Timeout       time.Duration
-	InsecureHTTP  bool
-	MergeExisting bool
+	BaseURL           string
+	Token             string
+	UserIDClaim       string
+	AttributeKey      string
+	VerifiedGroupUUID string
+	Timeout           time.Duration
+	InsecureHTTP      bool
+	MergeExisting     bool
 }
 
 type AlipayConfig struct {
@@ -137,13 +138,14 @@ func Load() (Config, error) {
 			UserIDClaim:  getenv("OIDC_USER_ID_CLAIM", "sub"),
 		},
 		Authentik: AuthentikConfig{
-			BaseURL:       strings.TrimRight(getenv("AUTHENTIK_BASE_URL", ""), "/"),
-			Token:         getenv("AUTHENTIK_TOKEN", ""),
-			UserIDClaim:   getenv("AUTHENTIK_USER_ID_CLAIM", "ak_user_id"),
-			AttributeKey:  getenv("AUTHENTIK_ATTRIBUTE_KEY", "alipay_kyc"),
-			Timeout:       secondsEnv("AUTHENTIK_TIMEOUT_SECONDS", 10),
-			InsecureHTTP:  boolEnv("AUTHENTIK_INSECURE_HTTP", false),
-			MergeExisting: boolEnv("AUTHENTIK_MERGE_EXISTING_ATTRIBUTES", true),
+			BaseURL:           strings.TrimRight(getenv("AUTHENTIK_BASE_URL", ""), "/"),
+			Token:             getenv("AUTHENTIK_TOKEN", ""),
+			UserIDClaim:       getenv("AUTHENTIK_USER_ID_CLAIM", "ak_user_id"),
+			AttributeKey:      getenv("AUTHENTIK_ATTRIBUTE_KEY", "alipay_kyc"),
+			VerifiedGroupUUID: getenv("AUTHENTIK_VERIFIED_GROUP_UUID", ""),
+			Timeout:           secondsEnv("AUTHENTIK_TIMEOUT_SECONDS", 10),
+			InsecureHTTP:      boolEnv("AUTHENTIK_INSECURE_HTTP", false),
+			MergeExisting:     boolEnv("AUTHENTIK_MERGE_EXISTING_ATTRIBUTES", true),
 		},
 		Alipay: AlipayConfig{
 			Enabled:            boolEnv("ALIPAY_KYC_ENABLED", true),

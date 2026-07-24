@@ -107,6 +107,7 @@ Aliyun `CertifyId` and `CertifyUrl` are valid for 30 minutes and can only be sub
 | `AUTHENTIK_TOKEN` | yes | empty | authentik API token. |
 | `AUTHENTIK_USER_ID_CLAIM` | no | `ak_user_id` | OIDC claim used as authentik user pk. |
 | `AUTHENTIK_ATTRIBUTE_KEY` | no | `alipay_kyc` | User attribute key written by the service. |
+| `AUTHENTIK_VERIFIED_GROUP_UUID` | no | empty | Optional authentik group UUID. Verified users are added to this group after KYC, and admins can manually sync already verified users into it. |
 | `ALIPAY_KYC_ENABLED` | no | `true` | Enable Alipay KYC. If both Alipay and Aliyun are enabled, Alipay is the default provider. |
 | `ALIPAY_GATEWAY_URL` | no | `https://openapi.alipay.com/gateway.do` | Alipay OpenAPI gateway. |
 | `ALIPAY_APP_ID` | when Alipay enabled | empty | Alipay app ID. |
@@ -168,7 +169,9 @@ Set `ADMIN_ENABLED=true` and `ADMIN_ALLOWED_USERNAMES` to enable `/admin/` for s
 
 When `需要 KYC 认证` is `否`, the service writes the same local encrypted PII record and authentik attribute shape as the normal flow immediately, using `channel: "admin"`, without incrementing verification counters.
 
-When `需要 KYC 认证` is `是`, the service creates a 24-hour shortcut KYC link and QR code for the administrator. The user can open that link without logging in and verify against the administrator-provided identity information, or log in normally and use the prefilled identity prompt shown on the standard KYC page. Logged-in users may cancel the prefilled identity and enter their own information. Once a provider certification URL is generated, that pending verification keeps the identity information used at generation time, so later edits or a new start do not change the old pending result.
+When `需要 KYC 认证` is `是`, the service creates a 24-hour shortcut KYC link and QR code for the administrator. The user can open that link without logging in and verify against the administrator-provided identity information, or log in normally and use the prefilled identity prompt shown on the standard KYC page. The shortcut identity cannot be edited by the user; if it is wrong, the administrator should generate a new shortcut link. Once a provider certification URL is generated, that pending verification keeps the identity information used at generation time, so later edits or a new start do not change the old pending result.
+
+If `AUTHENTIK_VERIFIED_GROUP_UUID` is set, every successful KYC writeback also adds the authentik user to that group. The admin page also shows a `同步已认证用户到组` button, which scans users with the configured KYC attribute marked `verified: true` and adds them to the configured group.
 
 Stats API:
 

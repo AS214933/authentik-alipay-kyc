@@ -45,6 +45,8 @@ type OIDCClient interface {
 type AuthentikClient interface {
 	GetUser(ctx context.Context, userID string) (authentik.User, error)
 	HasSMSDevice(ctx context.Context, userID string) (bool, error)
+	AddUserToGroup(ctx context.Context, groupUUID, userID string) error
+	VerifiedUserIDs(ctx context.Context) ([]string, error)
 	MarkVerified(ctx context.Context, userID string, attr authentik.KYCAttribute) error
 }
 
@@ -225,6 +227,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/admin/status", s.adminStatus)
 	mux.HandleFunc("GET /api/admin/user-mfa", s.adminUserMFA)
 	mux.HandleFunc("POST /api/admin/import", s.adminImport)
+	mux.HandleFunc("POST /api/admin/sync-group", s.adminSyncGroup)
 	mux.HandleFunc("GET /api/kyc/invite", s.kycInvite)
 	mux.HandleFunc("POST /api/kyc/start", s.startKYC)
 	mux.HandleFunc("POST /api/kyc/confirm", s.confirmKYC)
@@ -396,10 +399,11 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 	authenticated := stringValue(sess.Values[session.UserIDKey]) != ""
 	allowed := s.adminAllowedSession(sess.Values)
 	response := map[string]interface{}{
-		"enabled":       s.cfg.Admin.Enabled,
-		"authenticated": authenticated,
-		"allowed":       allowed,
-		"login_url":     s.cfg.PublicURL + "/auth/login?return_to=%2Fadmin",
+		"enabled":            s.cfg.Admin.Enabled,
+		"authenticated":      authenticated,
+		"allowed":            allowed,
+		"group_sync_enabled": s.verifiedGroupConfigured(),
+		"login_url":          s.cfg.PublicURL + "/auth/login?return_to=%2Fadmin",
 	}
 	if allowed {
 		token, err := s.ensureAdminCSRFToken(r, w, sess.Values)
@@ -523,6 +527,38 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 		"requires_kyc": false,
 		"user_id":      userID,
 		"kyc":          attr,
+	})
+}
+
+func (s *Server) adminSyncGroup(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.Admin.Enabled {
+		writeError(w, http.StatusNotFound, "admin import is disabled")
+		return
+	}
+	if !s.adminAuthorized(r) || !s.validAdminCSRF(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !s.verifiedGroupConfigured() {
+		writeError(w, http.StatusBadRequest, "verified group is not configured")
+		return
+	}
+	userIDs, err := s.authentik.VerifiedUserIDs(r.Context())
+	if err != nil {
+		s.logger.Warn("failed to list verified authentik users", "error", err)
+		writeError(w, http.StatusBadGateway, "failed to list verified users")
+		return
+	}
+	for _, userID := range userIDs {
+		if err := s.addVerifiedUserToGroup(r.Context(), userID); err != nil {
+			s.logger.Warn("failed to add verified user to group", "user_id", userID, "error", err)
+			writeError(w, http.StatusBadGateway, "failed to add verified user to group")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"synced": len(userIDs),
+		"total":  len(userIDs),
 	})
 }
 
@@ -1139,7 +1175,24 @@ func (s *Server) markKYCAttribute(ctx context.Context, userID string, attr authe
 	if err := s.authentik.MarkVerified(ctx, userID, attr); err != nil {
 		return authentik.KYCAttribute{}, err
 	}
+	if attr.Verified {
+		if err := s.addVerifiedUserToGroup(ctx, userID); err != nil {
+			return authentik.KYCAttribute{}, err
+		}
+	}
 	return attr, nil
+}
+
+func (s *Server) addVerifiedUserToGroup(ctx context.Context, userID string) error {
+	groupUUID := strings.TrimSpace(s.cfg.Authentik.VerifiedGroupUUID)
+	if groupUUID == "" {
+		return nil
+	}
+	return s.authentik.AddUserToGroup(ctx, groupUUID, userID)
+}
+
+func (s *Server) verifiedGroupConfigured() bool {
+	return strings.TrimSpace(s.cfg.Authentik.VerifiedGroupUUID) != ""
 }
 
 func (s *Server) recordTotal() {

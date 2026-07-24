@@ -339,6 +339,10 @@ select:focus {
   margin-top: 18px;
 }
 
+.admin-actions {
+  margin-top: 16px;
+}
+
 .admin-invite,
 .preset-box {
   display: grid;

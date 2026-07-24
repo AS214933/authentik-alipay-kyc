@@ -103,6 +103,19 @@ func TestLoadDefaultsQRNoticeHTMLToEmpty(t *testing.T) {
 	}
 }
 
+func TestLoadReadsAuthentikVerifiedGroupUUID(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("AUTHENTIK_VERIFIED_GROUP_UUID", "group-uuid")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Authentik.VerifiedGroupUUID != "group-uuid" {
+		t.Fatalf("VerifiedGroupUUID = %q", cfg.Authentik.VerifiedGroupUUID)
+	}
+}
+
 func TestLoadDefaultsAlipayKYCTimeoutTo23Hours(t *testing.T) {
 	setRequiredEnv(t)
 

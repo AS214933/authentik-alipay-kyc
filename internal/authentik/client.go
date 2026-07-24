@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +30,13 @@ type User struct {
 	Name       string                 `json:"name"`
 	Email      string                 `json:"email"`
 	Attributes map[string]interface{} `json:"attributes"`
+}
+
+type usersPage struct {
+	Pagination struct {
+		Next int `json:"next"`
+	} `json:"pagination"`
+	Results []User `json:"results"`
 }
 
 type KYCAttribute struct {
@@ -115,6 +123,87 @@ func (c *Client) HasSMSDevice(ctx context.Context, userID string) (bool, error) 
 	return false, nil
 }
 
+func (c *Client) AddUserToGroup(ctx context.Context, groupUUID, userID string) error {
+	groupUUID = strings.TrimSpace(groupUUID)
+	userID = strings.TrimSpace(userID)
+	if groupUUID == "" {
+		return fmt.Errorf("authentik group sync requires group uuid")
+	}
+	userPK, err := strconv.ParseInt(userID, 10, 64)
+	if err != nil || userPK <= 0 {
+		return fmt.Errorf("authentik group sync requires numeric user id")
+	}
+	payload := map[string]int64{"pk": userPK}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	reqURL := c.baseURL + "/api/v3/core/groups/" + url.PathEscape(groupUUID) + "/add_user/"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	c.auth(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("authentik add user to group failed: status=%d body=%s", resp.StatusCode, safeBodySummary(body))
+	}
+	return nil
+}
+
+func (c *Client) VerifiedUserIDs(ctx context.Context) ([]string, error) {
+	const pageSize = 100
+	page := 1
+	userIDs := []string{}
+	for {
+		values := url.Values{}
+		values.Set("page", strconv.Itoa(page))
+		values.Set("page_size", strconv.Itoa(pageSize))
+		reqURL := c.baseURL + "/api/v3/core/users/?" + values.Encode()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		c.auth(req)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("authentik list users failed: status=%d body=%s", resp.StatusCode, safeBodySummary(body))
+		}
+
+		users, next, err := parseUsersPage(body)
+		if err != nil {
+			return nil, err
+		}
+		for _, user := range users {
+			if user.ID > 0 && userKYCVerified(user, c.attributeKey) {
+				userIDs = append(userIDs, strconv.FormatInt(user.ID, 10))
+			}
+		}
+		if next <= 0 {
+			break
+		}
+		page = next
+	}
+	return userIDs, nil
+}
+
 func (c *Client) MarkVerified(ctx context.Context, userID string, attr KYCAttribute) error {
 	attributes := map[string]interface{}{
 		c.attributeKey: attr,
@@ -169,6 +258,41 @@ func parseAuthenticatorDevices(body []byte) ([]authenticatorDevice, error) {
 		return nil, err
 	}
 	return devices, nil
+}
+
+func parseUsersPage(body []byte) ([]User, int, error) {
+	var page usersPage
+	if err := json.Unmarshal(body, &page); err == nil && page.Results != nil {
+		return page.Results, page.Pagination.Next, nil
+	}
+	var users []User
+	if err := json.Unmarshal(body, &users); err != nil {
+		return nil, 0, err
+	}
+	return users, 0, nil
+}
+
+func userKYCVerified(user User, attributeKey string) bool {
+	attr, ok := user.Attributes[attributeKey]
+	if !ok {
+		return false
+	}
+	if typed, ok := attr.(KYCAttribute); ok {
+		return typed.Verified
+	}
+	if typed, ok := attr.(map[string]interface{}); ok {
+		verified, _ := typed["verified"].(bool)
+		return verified
+	}
+	data, err := json.Marshal(attr)
+	if err != nil {
+		return false
+	}
+	var typed KYCAttribute
+	if err := json.Unmarshal(data, &typed); err != nil {
+		return false
+	}
+	return typed.Verified
 }
 
 func (d authenticatorDevice) isSMS() bool {

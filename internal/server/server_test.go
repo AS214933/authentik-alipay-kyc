@@ -36,13 +36,18 @@ func (fakeOIDC) Exchange(context.Context, string, string) (oidc.Claims, error) {
 }
 
 type fakeAuthentik struct {
-	user            authentik.User
-	userID          string
-	attr            authentik.KYCAttribute
-	smsDeviceBound  *bool
-	smsDeviceByUser map[string]bool
-	smsDeviceErr    error
-	smsLookupUserID []string
+	user             authentik.User
+	userID           string
+	attr             authentik.KYCAttribute
+	smsDeviceBound   *bool
+	smsDeviceByUser  map[string]bool
+	smsDeviceErr     error
+	smsLookupUserID  []string
+	groupUsers       []string
+	groupUUIDs       []string
+	groupErr         error
+	verifiedUserIDs  []string
+	verifiedUsersErr error
 }
 
 func (f *fakeAuthentik) GetUser(context.Context, string) (authentik.User, error) {
@@ -61,6 +66,22 @@ func (f *fakeAuthentik) HasSMSDevice(_ context.Context, userID string) (bool, er
 		return *f.smsDeviceBound, nil
 	}
 	return true, nil
+}
+
+func (f *fakeAuthentik) AddUserToGroup(_ context.Context, groupUUID, userID string) error {
+	f.groupUUIDs = append(f.groupUUIDs, groupUUID)
+	f.groupUsers = append(f.groupUsers, userID)
+	if f.groupErr != nil {
+		return f.groupErr
+	}
+	return nil
+}
+
+func (f *fakeAuthentik) VerifiedUserIDs(context.Context) ([]string, error) {
+	if f.verifiedUsersErr != nil {
+		return nil, f.verifiedUsersErr
+	}
+	return append([]string{}, f.verifiedUserIDs...), nil
 }
 
 func (f *fakeAuthentik) MarkVerified(_ context.Context, userID string, attr authentik.KYCAttribute) error {
@@ -261,6 +282,37 @@ func TestKYCFlowWritesAuthentikAttribute(t *testing.T) {
 	}
 	if counters.Total != 1 || counters.Success != 1 || counters.Failure != 0 {
 		t.Fatalf("unexpected counters: %+v", counters)
+	}
+}
+
+func TestMarkKYCAttributeAddsVerifiedUserToConfiguredGroup(t *testing.T) {
+	cfg := testConfig()
+	cfg.Authentik.VerifiedGroupUUID = "verified-group"
+	ak := &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: ak,
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+
+	_, err := srv.markKYCAttribute(context.Background(), "5", authentik.KYCAttribute{
+		Verified:   true,
+		Channel:    ProviderAlipay,
+		IDHash:     strings.Repeat("0", 64),
+		IDLast4:    "0014",
+		NameMasked: "*四",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(ak.groupUUIDs, ",") != "verified-group" || strings.Join(ak.groupUsers, ",") != "5" {
+		t.Fatalf("unexpected group additions: groups=%+v users=%+v", ak.groupUUIDs, ak.groupUsers)
 	}
 }
 
@@ -1488,6 +1540,56 @@ func TestAdminUserMFAReturnsSMSDeviceStatus(t *testing.T) {
 	}
 	if strings.Join(ak.smsLookupUserID, ",") != "5" {
 		t.Fatalf("sms lookup user ids = %+v, want 5", ak.smsLookupUserID)
+	}
+}
+
+func TestAdminSyncGroupAddsVerifiedUsersToConfiguredGroup(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.AllowedUsernames = []string{"admin"}
+	cfg.Authentik.VerifiedGroupUUID = "verified-group"
+	ak := &fakeAuthentik{
+		user:            authentik.User{Attributes: map[string]interface{}{}},
+		verifiedUserIDs: []string{"5", "6"},
+	}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: ak,
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	admin := adminSession(t, handler, srv, "admin")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/sync-group", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", admin.csrfToken)
+	for _, cookie := range admin.cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin sync group status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Synced int `json:"synced"`
+		Total  int `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Synced != 2 || body.Total != 2 {
+		t.Fatalf("unexpected sync body: %+v", body)
+	}
+	if strings.Join(ak.groupUUIDs, ",") != "verified-group,verified-group" || strings.Join(ak.groupUsers, ",") != "5,6" {
+		t.Fatalf("unexpected group additions: groups=%+v users=%+v", ak.groupUUIDs, ak.groupUsers)
 	}
 }
 

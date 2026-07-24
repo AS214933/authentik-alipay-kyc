@@ -84,6 +84,14 @@
               </button>
             </form>
 
+            <div v-if="admin.groupSyncEnabled" class="admin-actions">
+              <button class="secondary" type="button" :disabled="admin.groupSyncBusy" @click="syncVerifiedGroup">
+                <LoaderCircle v-if="admin.groupSyncBusy" class="spin" :size="18" />
+                <CircleCheck v-else :size="18" />
+                同步已认证用户到组
+              </button>
+            </div>
+
             <div v-if="admin.invite" class="admin-invite">
               <div class="qr-frame">
                 <img :src="admin.invite.qrCode" alt="快捷 KYC 链接二维码" />
@@ -330,6 +338,8 @@ const admin = reactive({
   enabled: false,
   authenticated: false,
   allowed: false,
+  groupSyncEnabled: false,
+  groupSyncBusy: false,
   csrfToken: '',
   loginUrl: '/auth/login?return_to=%2Fadmin',
   result: null,
@@ -506,6 +516,7 @@ async function loadAdminStatus() {
     admin.enabled = Boolean(data.enabled)
     admin.authenticated = Boolean(data.authenticated)
     admin.allowed = Boolean(data.allowed)
+    admin.groupSyncEnabled = Boolean(data.group_sync_enabled)
     admin.csrfToken = data.csrf_token || ''
     admin.loginUrl = data.login_url || '/auth/login?return_to=%2Fadmin'
   } catch (err) {
@@ -529,6 +540,29 @@ async function checkAdminUserMFA(userID, sequence) {
     if (sequence === adminMfaCheckSequence) {
       admin.smsMfaChecking = false
     }
+  }
+}
+
+async function syncVerifiedGroup() {
+  admin.groupSyncBusy = true
+  admin.error = ''
+  admin.success = ''
+  try {
+    const data = await request('/api/admin/sync-group', {
+      method: 'POST',
+      headers: adminCSRFHeaders(),
+      body: '{}'
+    })
+    admin.success = `已同步 ${data.synced || 0} 个已认证用户到组`
+  } catch (err) {
+    if (err.status === 401) {
+      admin.allowed = false
+      admin.error = '当前登录用户无权使用管理导入或登录已失效'
+    } else {
+      admin.error = err.message
+    }
+  } finally {
+    admin.groupSyncBusy = false
   }
 }
 
