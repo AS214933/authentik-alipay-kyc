@@ -12,10 +12,14 @@ import (
 )
 
 type fakeSDK struct {
-	initResp  *cloudauth.InitFaceVerifyResponse
-	queryResp *cloudauth.DescribeFaceVerifyResponse
-	err       error
-	initReq   *cloudauth.InitFaceVerifyRequest
+	initResp    *cloudauth.InitFaceVerifyResponse
+	queryResp   *cloudauth.DescribeFaceVerifyResponse
+	id2Resp     *cloudauth.Id2MetaVerifyResponse
+	mobile3Resp *cloudauth.Mobile3MetaDetailVerifyResponse
+	err         error
+	initReq     *cloudauth.InitFaceVerifyRequest
+	id2Req      *cloudauth.Id2MetaVerifyRequest
+	mobile3Req  *cloudauth.Mobile3MetaDetailVerifyRequest
 }
 
 func (f *fakeSDK) InitFaceVerify(req *cloudauth.InitFaceVerifyRequest) (*cloudauth.InitFaceVerifyResponse, error) {
@@ -31,6 +35,22 @@ func (f *fakeSDK) DescribeFaceVerify(*cloudauth.DescribeFaceVerifyRequest) (*clo
 		return nil, f.err
 	}
 	return f.queryResp, nil
+}
+
+func (f *fakeSDK) Id2MetaVerify(req *cloudauth.Id2MetaVerifyRequest) (*cloudauth.Id2MetaVerifyResponse, error) {
+	f.id2Req = req
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.id2Resp, nil
+}
+
+func (f *fakeSDK) Mobile3MetaDetailVerify(req *cloudauth.Mobile3MetaDetailVerifyRequest) (*cloudauth.Mobile3MetaDetailVerifyResponse, error) {
+	f.mobile3Req = req
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.mobile3Resp, nil
 }
 
 func TestInitializeFallsBackAcrossEndpoints(t *testing.T) {
@@ -111,6 +131,53 @@ func TestQueryReturnsPassed(t *testing.T) {
 	}
 }
 
+func TestVerifyID2MetaReturnsPassed(t *testing.T) {
+	sdk := &fakeSDK{id2Resp: id2Response("1")}
+	client := &Client{
+		clients: []*endpointClient{
+			{endpoint: "primary", client: sdk},
+		},
+	}
+
+	resp, err := client.VerifyID2Meta(context.Background(), ID2MetaVerifyRequest{
+		Name:     "张三",
+		IDNumber: "11010519491231002X",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Passed || resp.BizCode != "1" {
+		t.Fatalf("unexpected id2 response: %+v", resp)
+	}
+	if sdk.id2Req == nil || safeValue(sdk.id2Req.UserName) != "张三" || safeValue(sdk.id2Req.IdentifyNum) != "11010519491231002X" || safeValue(sdk.id2Req.ParamType) != "normal" {
+		t.Fatalf("unexpected id2 request: %+v", sdk.id2Req)
+	}
+}
+
+func TestVerifyMobile3MetaDetailReturnsDetail(t *testing.T) {
+	sdk := &fakeSDK{mobile3Resp: mobile3Response("1", "101", "CMCC")}
+	client := &Client{
+		clients: []*endpointClient{
+			{endpoint: "primary", client: sdk},
+		},
+	}
+
+	resp, err := client.VerifyMobile3MetaDetail(context.Background(), Mobile3MetaDetailVerifyRequest{
+		Name:     "张三",
+		IDNumber: "11010519491231002X",
+		Mobile:   "13800138000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Passed || resp.BizCode != "1" || resp.SubCode != "101" || resp.ISPName != "CMCC" {
+		t.Fatalf("unexpected mobile3 response: %+v", resp)
+	}
+	if sdk.mobile3Req == nil || safeValue(sdk.mobile3Req.UserName) != "张三" || safeValue(sdk.mobile3Req.IdentifyNum) != "11010519491231002X" || safeValue(sdk.mobile3Req.Mobile) != "13800138000" || safeValue(sdk.mobile3Req.ParamType) != "normal" {
+		t.Fatalf("unexpected mobile3 request: %+v", sdk.mobile3Req)
+	}
+}
+
 func TestNewOpenAPIConfigAppliesTimeout(t *testing.T) {
 	cfg := config.AliyunConfig{
 		AccessKeyID:     "ak",
@@ -123,6 +190,24 @@ func TestNewOpenAPIConfigAppliesTimeout(t *testing.T) {
 	}
 	if sdkConfig.ConnectTimeout == nil || *sdkConfig.ConnectTimeout != 10000 {
 		t.Fatalf("ConnectTimeout = %v, want 10000", sdkConfig.ConnectTimeout)
+	}
+}
+
+func TestNewClientAllowsMetaVerifyWithoutSceneID(t *testing.T) {
+	client, err := NewClient(config.AliyunConfig{
+		AccessKeyID:          "ak",
+		AccessKeySecret:      "secret",
+		Endpoints:            []string{"cloudauth.cn-shanghai.aliyuncs.com"},
+		ID2MetaVerifyEnabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client == nil {
+		t.Fatal("expected aliyun client")
+	}
+	if client.sceneID != 0 || len(client.clients) != 1 {
+		t.Fatalf("unexpected aliyun client: sceneID=%d endpoints=%d", client.sceneID, len(client.clients))
 	}
 }
 
@@ -144,6 +229,34 @@ func queryResponse(passed string) *cloudauth.DescribeFaceVerifyResponse {
 			Code: stringPtr("200"),
 			ResultObject: &cloudauth.DescribeFaceVerifyResponseBodyResultObject{
 				Passed: stringPtr(passed),
+			},
+		},
+	}
+}
+
+func id2Response(bizCode string) *cloudauth.Id2MetaVerifyResponse {
+	return &cloudauth.Id2MetaVerifyResponse{
+		Body: &cloudauth.Id2MetaVerifyResponseBody{
+			Code:      stringPtr("200"),
+			Message:   stringPtr("success"),
+			RequestId: stringPtr("REQ123"),
+			ResultObject: &cloudauth.Id2MetaVerifyResponseBodyResultObject{
+				BizCode: stringPtr(bizCode),
+			},
+		},
+	}
+}
+
+func mobile3Response(bizCode, subCode, ispName string) *cloudauth.Mobile3MetaDetailVerifyResponse {
+	return &cloudauth.Mobile3MetaDetailVerifyResponse{
+		Body: &cloudauth.Mobile3MetaDetailVerifyResponseBody{
+			Code:      stringPtr("200"),
+			Message:   stringPtr("success"),
+			RequestId: stringPtr("REQ123"),
+			ResultObject: &cloudauth.Mobile3MetaDetailVerifyResponseBodyResultObject{
+				BizCode: stringPtr(bizCode),
+				SubCode: stringPtr(subCode),
+				IspName: stringPtr(ispName),
 			},
 		},
 	}

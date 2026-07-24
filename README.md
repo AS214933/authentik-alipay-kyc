@@ -79,6 +79,8 @@ cloudauth.cn-shanghai.aliyuncs.com,cloudauth.cn-beijing.aliyuncs.com
 
 Aliyun `CertifyId` and `CertifyUrl` are valid for 30 minutes and can only be submitted once. Alipay pending verification defaults to 23 hours.
 
+Set `ALIYUN_ID2_META_VERIFY_ENABLED=true` to enable Aliyun identity two-factor information verification. This flag can enable the admin information verification button independently of the Aliyun KYC channel, but it still requires Aliyun AccessKey credentials. When Aliyun KYC is also enabled, Aliyun KYC start requests run `Id2MetaVerify` before `InitFaceVerify`; only a passed result generates the Aliyun verification URL. This user-facing precheck is throttled per user and client IP with a short cooldown and daily cap to reduce accidental abuse.
+
 ## Configuration
 
 | Variable | Required | Default | Description |
@@ -127,6 +129,8 @@ Aliyun `CertifyId` and `CertifyUrl` are valid for 30 minutes and can only be sub
 | `ALIYUN_CERT_TYPE` | no | `IDENTITY_CARD` | Aliyun certificate type. |
 | `ALIYUN_RETURN_URL` | no | `${PUBLIC_URL}/verify/callback` | Aliyun browser return URL. |
 | `ALIYUN_TIMEOUT_SECONDS` | no | `10` | Aliyun API client timeout. |
+| `ALIYUN_ID2_META_VERIFY_ENABLED` | no | `false` | Enable Aliyun `Id2MetaVerify`. This also shows the admin identity two-factor button and enables the user-facing Aliyun precheck before QR generation. |
+| `ALIYUN_MOBILE3_META_DETAIL_VERIFY_ENABLED` | no | `false` | Enable the admin-only Aliyun `Mobile3MetaDetailVerify` detailed phone three-factor button. |
 
 ## Run
 
@@ -172,6 +176,8 @@ When `需要 KYC 认证` is `否`, the service writes the same local encrypted P
 When `需要 KYC 认证` is `是`, the service creates a 24-hour shortcut KYC link and QR code for the administrator. The user can open that link without logging in and verify against the administrator-provided identity information, or log in normally and use the prefilled identity prompt shown on the standard KYC page. The shortcut identity cannot be edited by the user; if it is wrong, the administrator should generate a new shortcut link. Once a provider certification URL is generated, that pending verification keeps the identity information used at generation time, so later edits or a new start do not change the old pending result.
 
 If `AUTHENTIK_VERIFIED_GROUP_UUID` is set, every successful KYC writeback also adds the authentik user to that group. The admin page also shows a `同步已认证用户到组` button, which scans users with the configured KYC attribute marked `verified: true` and adds them to the configured group.
+
+When the Aliyun information verification flags are enabled, the admin page shows `身份二要素核验` and/or `手机号三要素核验详版` buttons. These buttons require the normal admin login, allowed username, and CSRF token, and ask for confirmation before calling Aliyun to reduce accidental requests. They are not tied to the user-facing precheck limiter. The detailed phone three-factor button reads the target user's confirmed authentik SMS Device phone number server-side; if the user has no SMS Device or the number cannot be normalized to an 11-digit mainland China mobile number, the button stays disabled and the server refuses the Aliyun request.
 
 Stats API:
 

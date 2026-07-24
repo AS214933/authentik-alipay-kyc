@@ -76,6 +76,9 @@
                   required
                   maxlength="18"
                 />
+                <span v-if="adminImportForm.id_number && !adminIDNumberValid" class="field-hint warning">
+                  身份证号校验未通过
+                </span>
               </label>
               <button class="primary" type="submit" :disabled="admin.busy">
                 <LoaderCircle v-if="admin.busy" class="spin" :size="18" />
@@ -83,6 +86,32 @@
                 导入
               </button>
             </form>
+
+            <div v-if="hasAdminAliyunVerifyActions" class="admin-actions admin-verify-actions">
+              <button
+                v-if="admin.id2MetaVerifyEnabled"
+                class="secondary"
+                type="button"
+                :disabled="!canRunAdminID2Verify"
+                @click="runAdminID2Verify"
+              >
+                <LoaderCircle v-if="admin.id2VerifyBusy" class="spin" :size="18" />
+                <ShieldCheck v-else :size="18" />
+                身份二要素核验
+              </button>
+              <button
+                v-if="admin.mobile3MetaDetailVerifyEnabled"
+                class="secondary"
+                type="button"
+                :disabled="!canRunAdminMobile3Verify"
+                @click="runAdminMobile3Verify"
+              >
+                <LoaderCircle v-if="admin.mobile3VerifyBusy" class="spin" :size="18" />
+                <CircleCheck v-else :size="18" />
+                手机号三要素核验详版
+              </button>
+              <p class="field-hint">核验按钮会调用阿里云信息核验接口，请确认信息无误后再操作。</p>
+            </div>
 
             <div v-if="admin.groupSyncEnabled" class="admin-actions">
               <button class="secondary" type="button" :disabled="admin.groupSyncBusy" @click="syncVerifiedGroup">
@@ -124,6 +153,30 @@
 
           <p v-if="admin.error" class="error">{{ admin.error }}</p>
           <p v-if="admin.success" class="success">{{ admin.success }}</p>
+
+          <div v-if="admin.verifyModal.open" class="modal-backdrop" @click.self="closeAdminVerifyModal">
+            <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="admin-verify-title">
+              <header class="modal-header">
+                <div>
+                  <p class="eyebrow">阿里云信息核验</p>
+                  <h2 id="admin-verify-title">{{ admin.verifyModal.title }}</h2>
+                </div>
+                <button class="icon-button" type="button" title="关闭" @click="closeAdminVerifyModal">×</button>
+              </header>
+              <div class="verify-status" :class="{ passed: adminVerifyPassed, failed: !adminVerifyPassed }">
+                <CircleCheck v-if="adminVerifyPassed" :size="18" />
+                <AlertTriangle v-else :size="18" />
+                {{ adminVerifyStatusText }}
+              </div>
+              <div class="result-grid verify-result-grid">
+                <div v-for="row in adminVerifyResultRows" :key="row.label">
+                  <span class="label">{{ row.label }}</span>
+                  <strong>{{ row.value }}</strong>
+                </div>
+              </div>
+              <button class="primary" type="button" @click="closeAdminVerifyModal">关闭</button>
+            </section>
+          </div>
         </template>
       </template>
 
@@ -340,12 +393,23 @@ const admin = reactive({
   allowed: false,
   groupSyncEnabled: false,
   groupSyncBusy: false,
+  id2MetaVerifyEnabled: false,
+  mobile3MetaDetailVerifyEnabled: false,
+  id2VerifyBusy: false,
+  mobile3VerifyBusy: false,
   csrfToken: '',
   loginUrl: '/auth/login?return_to=%2Fadmin',
   result: null,
   invite: null,
+  verifyModal: {
+    open: false,
+    title: '',
+    result: null
+  },
   smsMfaChecking: false,
   smsMfaBound: null,
+  smsMobileAvailable: false,
+  smsMobileMasked: '',
   smsMfaMessage: '',
   error: '',
   success: ''
@@ -387,6 +451,36 @@ const launchButtonText = computed(() =>
 const qrAltText = computed(() =>
   state.pendingProvider === 'aliyun' ? '阿里云金融实人认证二维码' : '支付宝实名认证二维码'
 )
+const hasAdminAliyunVerifyActions = computed(() =>
+  admin.id2MetaVerifyEnabled || admin.mobile3MetaDetailVerifyEnabled
+)
+const adminIDNumberValid = computed(() => isValidIDNumber(adminImportForm.id_number))
+const canRunAdminID2Verify = computed(() =>
+  !admin.busy && !admin.id2VerifyBusy && Boolean(adminImportForm.name) && adminIDNumberValid.value
+)
+const canRunAdminMobile3Verify = computed(() =>
+  !admin.busy &&
+  !admin.mobile3VerifyBusy &&
+  !admin.smsMfaChecking &&
+  admin.smsMfaBound === true &&
+  admin.smsMobileAvailable === true &&
+  Boolean(adminImportForm.user_id && adminImportForm.name) &&
+  adminIDNumberValid.value
+)
+const adminVerifyPassed = computed(() => admin.verifyModal.result?.passed === true)
+const adminVerifyStatusText = computed(() => adminVerifyPassed.value ? '核验通过' : '核验未通过')
+const adminVerifyResultRows = computed(() => {
+  const result = admin.verifyModal.result || {}
+  return [
+    { label: '核验结果', value: result.passed === true ? '通过' : result.passed === false ? '未通过' : '' },
+    { label: '说明', value: result.message || '' },
+    { label: 'BizCode', value: result.biz_code || '' },
+    { label: 'SubCode', value: result.sub_code || '' },
+    { label: '运营商', value: result.isp_name || '' },
+    { label: '请求 ID', value: result.request_id || '' },
+    { label: '上游消息', value: result.upstream_message || '' }
+  ].filter((row) => row.value !== '')
+})
 
 onMounted(async () => {
   if (isAdminPage) {
@@ -410,6 +504,8 @@ watch(
   (userID) => {
     admin.smsMfaMessage = ''
     admin.smsMfaBound = null
+    admin.smsMobileAvailable = false
+    admin.smsMobileMasked = ''
     if (adminMfaCheckTimer) {
       window.clearTimeout(adminMfaCheckTimer)
     }
@@ -517,6 +613,8 @@ async function loadAdminStatus() {
     admin.authenticated = Boolean(data.authenticated)
     admin.allowed = Boolean(data.allowed)
     admin.groupSyncEnabled = Boolean(data.group_sync_enabled)
+    admin.id2MetaVerifyEnabled = Boolean(data.aliyun_id2_meta_verify_enabled)
+    admin.mobile3MetaDetailVerifyEnabled = Boolean(data.aliyun_mobile3_meta_detail_verify_enabled)
     admin.csrfToken = data.csrf_token || ''
     admin.loginUrl = data.login_url || '/auth/login?return_to=%2Fadmin'
   } catch (err) {
@@ -531,10 +629,22 @@ async function checkAdminUserMFA(userID, sequence) {
     const data = await request(`/api/admin/user-mfa?user_id=${encodeURIComponent(userID)}`)
     if (sequence !== adminMfaCheckSequence) return
     admin.smsMfaBound = Boolean(data.sms_mfa_bound)
-    admin.smsMfaMessage = admin.smsMfaBound ? '该用户已绑定手机号' : '该用户未绑定手机号'
+    admin.smsMobileAvailable = Boolean(data.sms_mobile_available)
+    admin.smsMobileMasked = data.sms_mobile_masked || ''
+    if (!admin.smsMfaBound) {
+      admin.smsMfaMessage = '该用户未绑定手机号'
+    } else if (!admin.smsMobileAvailable) {
+      admin.smsMfaMessage = '该用户已绑定 SMS Device，但手机号不可用于三要素核验'
+    } else {
+      admin.smsMfaMessage = admin.smsMobileMasked
+        ? `该用户已绑定手机号（${admin.smsMobileMasked}）`
+        : '该用户已绑定手机号'
+    }
   } catch (err) {
     if (sequence !== adminMfaCheckSequence) return
     admin.smsMfaBound = null
+    admin.smsMobileAvailable = false
+    admin.smsMobileMasked = ''
     admin.smsMfaMessage = err.message
   } finally {
     if (sequence === adminMfaCheckSequence) {
@@ -564,6 +674,83 @@ async function syncVerifiedGroup() {
   } finally {
     admin.groupSyncBusy = false
   }
+}
+
+async function runAdminID2Verify() {
+  if (!adminImportForm.name || !adminImportForm.id_number) {
+    admin.error = '请先填写姓名和身份证号'
+    return
+  }
+  if (!adminIDNumberValid.value) {
+    admin.error = '身份证号校验未通过'
+    return
+  }
+  await runAdminVerify({
+    endpoint: '/api/admin/aliyun/id2-meta-verify',
+    title: '身份二要素核验',
+    busyKey: 'id2VerifyBusy',
+    payload: {
+      name: adminImportForm.name,
+      id_number: adminImportForm.id_number
+    }
+  })
+}
+
+async function runAdminMobile3Verify() {
+  if (!adminImportForm.user_id || !adminImportForm.name || !adminImportForm.id_number) {
+    admin.error = '请先填写用户 ID、姓名和身份证号'
+    return
+  }
+  if (!adminIDNumberValid.value) {
+    admin.error = '身份证号校验未通过'
+    return
+  }
+  if (!admin.smsMfaBound || !admin.smsMobileAvailable) {
+    admin.error = '该用户未绑定可用于三要素核验的手机号'
+    return
+  }
+  await runAdminVerify({
+    endpoint: '/api/admin/aliyun/mobile3-meta-detail-verify',
+    title: '手机号三要素核验详版',
+    busyKey: 'mobile3VerifyBusy',
+    payload: {
+      user_id: adminImportForm.user_id,
+      name: adminImportForm.name,
+      id_number: adminImportForm.id_number
+    }
+  })
+}
+
+async function runAdminVerify({ endpoint, title, busyKey, payload }) {
+  if (!window.confirm(`${title}会产生一次阿里云信息核验请求，请确认信息无误。是否继续？`)) {
+    return
+  }
+  admin[busyKey] = true
+  admin.error = ''
+  admin.success = ''
+  try {
+    const data = await request(endpoint, {
+      method: 'POST',
+      headers: adminCSRFHeaders(),
+      body: JSON.stringify(payload)
+    })
+    admin.verifyModal.open = true
+    admin.verifyModal.title = title
+    admin.verifyModal.result = data.result || {}
+  } catch (err) {
+    if (err.status === 401) {
+      admin.allowed = false
+      admin.error = '当前登录用户无权使用管理导入或登录已失效'
+    } else {
+      admin.error = err.message
+    }
+  } finally {
+    admin[busyKey] = false
+  }
+}
+
+function closeAdminVerifyModal() {
+  admin.verifyModal.open = false
 }
 
 async function adminImport() {
@@ -670,6 +857,13 @@ async function startKyc() {
     if (err.status === 428 && err.body?.error === 'sms_mfa_required') {
       state.smsMfaBound = false
       state.mfaSettingsUrl = err.body.mfa_settings_url || state.mfaSettingsUrl
+      return
+    }
+    if (err.status === 422 && err.body?.error === 'aliyun_id2_meta_verify_failed') {
+      if (err.body.reset_session) {
+        resetKyc()
+      }
+      state.error = err.body.message || '身份二要素核验未通过，请重新开始认证。'
       return
     }
     state.error = state.provider === 'aliyun' && err.message === 'aliyun_meta_failed'
@@ -781,6 +975,38 @@ function loadAliyunMetaScript() {
 
 function isMobileBrowser() {
   return /Android|iPhone|iPad|iPod|Mobile/i.test(window.navigator.userAgent)
+}
+
+function normalizeIDNumber(value) {
+  return String(value || '').trim().toUpperCase().replace(/[^0-9X]/g, '')
+}
+
+function isValidIDNumber(value) {
+  const normalized = normalizeIDNumber(value)
+  if (normalized.length === 15) {
+    return isValidIDDate(`19${normalized.slice(6, 12)}`)
+  }
+  if (!/^\d{17}[0-9X]$/.test(normalized)) {
+    return false
+  }
+  if (!isValidIDDate(normalized.slice(6, 14))) {
+    return false
+  }
+  const weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2]
+  const checks = '10X98765432'
+  const sum = weights.reduce((total, weight, index) => total + Number(normalized[index]) * weight, 0)
+  return normalized[17] === checks[sum % 11]
+}
+
+function isValidIDDate(value) {
+  if (!/^\d{8}$/.test(value)) {
+    return false
+  }
+  const year = Number(value.slice(0, 4))
+  const month = Number(value.slice(4, 6))
+  const day = Number(value.slice(6, 8))
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
 }
 
 function providerDisplayName(provider) {

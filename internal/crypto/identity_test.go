@@ -22,6 +22,21 @@ func TestIDHashUsesPepper(t *testing.T) {
 	}
 }
 
+func TestValidIDNumber(t *testing.T) {
+	cases := map[string]bool{
+		"11010519491231002X": true,
+		"110105194912310021": false,
+		"11010519491331002X": false,
+		"110105491231002":    true,
+		"110105491332002":    false,
+	}
+	for in, want := range cases {
+		if got := ValidIDNumber(in); got != want {
+			t.Fatalf("ValidIDNumber(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
 func TestLast4(t *testing.T) {
 	got := Last4("11010519491231002x")
 	if got != "002X" {

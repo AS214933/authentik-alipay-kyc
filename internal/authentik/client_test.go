@@ -91,6 +91,44 @@ func TestHasSMSDeviceIgnoresUnconfirmedSMSDevice(t *testing.T) {
 	}
 }
 
+func TestSMSDeviceReturnsPhoneNumberFromDetail(t *testing.T) {
+	requestedPaths := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedPaths = append(requestedPaths, r.URL.Path)
+		switch r.URL.Path {
+		case "/api/v3/authenticators/admin/all/":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"results": []map[string]interface{}{
+					{"pk": 42, "meta_model_name": "authentik_stages_authenticator_sms.smsdevice", "confirmed": true},
+				},
+			})
+		case "/api/v3/authenticators/admin/sms/42/":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"phone_number": "+8613800138000",
+			})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client := &Client{
+		baseURL:    server.URL,
+		token:      "token",
+		httpClient: server.Client(),
+	}
+	device, err := client.SMSDevice(context.Background(), "5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !device.Bound || device.PhoneNumber != "+8613800138000" {
+		t.Fatalf("unexpected sms device: %+v", device)
+	}
+	if strings.Join(requestedPaths, ",") != "/api/v3/authenticators/admin/all/,/api/v3/authenticators/admin/sms/42/" {
+		t.Fatalf("unexpected requested paths: %+v", requestedPaths)
+	}
+}
+
 func TestHasSMSDeviceRedactsUpstreamErrorBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"phone":"+8613800138000","sms":"secret"}`, http.StatusBadGateway)

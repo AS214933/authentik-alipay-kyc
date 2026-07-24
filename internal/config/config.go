@@ -69,16 +69,18 @@ type AlipayConfig struct {
 }
 
 type AliyunConfig struct {
-	Enabled         bool
-	AccessKeyID     string
-	AccessKeySecret string
-	SceneID         int64
-	Endpoints       []string
-	ProductCode     string
-	Model           string
-	CertType        string
-	ReturnURL       string
-	Timeout         time.Duration
+	Enabled                        bool
+	AccessKeyID                    string
+	AccessKeySecret                string
+	SceneID                        int64
+	Endpoints                      []string
+	ProductCode                    string
+	Model                          string
+	CertType                       string
+	ReturnURL                      string
+	Timeout                        time.Duration
+	ID2MetaVerifyEnabled           bool
+	Mobile3MetaDetailVerifyEnabled bool
 }
 
 type AdminConfig struct {
@@ -161,16 +163,18 @@ func Load() (Config, error) {
 			Timeout:            secondsEnv("ALIPAY_TIMEOUT_SECONDS", 15),
 		},
 		Aliyun: AliyunConfig{
-			Enabled:         boolEnv("ALIYUN_KYC_ENABLED", false),
-			AccessKeyID:     getenv("ALIYUN_ACCESS_KEY_ID", ""),
-			AccessKeySecret: getenv("ALIYUN_ACCESS_KEY_SECRET", ""),
-			SceneID:         int64Env("ALIYUN_SCENE_ID", 0),
-			Endpoints:       splitCSV(getenv("ALIYUN_ENDPOINTS", "cloudauth.cn-shanghai.aliyuncs.com,cloudauth.cn-beijing.aliyuncs.com")),
-			ProductCode:     getenv("ALIYUN_PRODUCT_CODE", "ID_PRO"),
-			Model:           getenv("ALIYUN_MODEL", "MOVE_ACTION"),
-			CertType:        getenv("ALIYUN_CERT_TYPE", "IDENTITY_CARD"),
-			ReturnURL:       aliyunReturnURL,
-			Timeout:         secondsEnv("ALIYUN_TIMEOUT_SECONDS", 10),
+			Enabled:                        boolEnv("ALIYUN_KYC_ENABLED", false),
+			AccessKeyID:                    getenv("ALIYUN_ACCESS_KEY_ID", ""),
+			AccessKeySecret:                getenv("ALIYUN_ACCESS_KEY_SECRET", ""),
+			SceneID:                        int64Env("ALIYUN_SCENE_ID", 0),
+			Endpoints:                      splitCSV(getenv("ALIYUN_ENDPOINTS", "cloudauth.cn-shanghai.aliyuncs.com,cloudauth.cn-beijing.aliyuncs.com")),
+			ProductCode:                    getenv("ALIYUN_PRODUCT_CODE", "ID_PRO"),
+			Model:                          getenv("ALIYUN_MODEL", "MOVE_ACTION"),
+			CertType:                       getenv("ALIYUN_CERT_TYPE", "IDENTITY_CARD"),
+			ReturnURL:                      aliyunReturnURL,
+			Timeout:                        secondsEnv("ALIYUN_TIMEOUT_SECONDS", 10),
+			ID2MetaVerifyEnabled:           boolEnv("ALIYUN_ID2_META_VERIFY_ENABLED", false),
+			Mobile3MetaDetailVerifyEnabled: boolEnv("ALIYUN_MOBILE3_META_DETAIL_VERIFY_ENABLED", false),
 		},
 		Admin: AdminConfig{
 			Enabled:          boolEnv("ADMIN_ENABLED", false),
@@ -208,18 +212,25 @@ func Load() (Config, error) {
 	if cfg.Alipay.Enabled && (cfg.Alipay.AppID == "" || cfg.Alipay.AppPrivateKeyPEM == "" || cfg.Alipay.AlipayPublicKeyPEM == "") {
 		return Config{}, errors.New("ALIPAY_APP_ID, ALIPAY_APP_PRIVATE_KEY, and ALIPAY_PUBLIC_KEY are required when ALIPAY_KYC_ENABLED is true")
 	}
-	if cfg.Aliyun.Enabled {
-		if cfg.Aliyun.AccessKeyID == "" || cfg.Aliyun.AccessKeySecret == "" || cfg.Aliyun.SceneID <= 0 {
-			return Config{}, errors.New("ALIYUN_ACCESS_KEY_ID, ALIYUN_ACCESS_KEY_SECRET, and ALIYUN_SCENE_ID are required when ALIYUN_KYC_ENABLED is true")
+	if aliyunAPIEnabled(cfg.Aliyun) {
+		if cfg.Aliyun.AccessKeyID == "" || cfg.Aliyun.AccessKeySecret == "" {
+			return Config{}, errors.New("ALIYUN_ACCESS_KEY_ID and ALIYUN_ACCESS_KEY_SECRET are required when any Aliyun API feature is enabled")
 		}
 		if len(cfg.Aliyun.Endpoints) == 0 {
-			return Config{}, errors.New("ALIYUN_ENDPOINTS must contain at least one endpoint when ALIYUN_KYC_ENABLED is true")
+			return Config{}, errors.New("ALIYUN_ENDPOINTS must contain at least one endpoint when any Aliyun API feature is enabled")
 		}
+	}
+	if cfg.Aliyun.Enabled && cfg.Aliyun.SceneID <= 0 {
+		return Config{}, errors.New("ALIYUN_SCENE_ID is required when ALIYUN_KYC_ENABLED is true")
 	}
 	if cfg.Admin.Enabled && len(cfg.Admin.AllowedUsernames) == 0 {
 		return Config{}, errors.New("ADMIN_ALLOWED_USERNAMES is required when ADMIN_ENABLED is true")
 	}
 	return cfg, nil
+}
+
+func aliyunAPIEnabled(cfg AliyunConfig) bool {
+	return cfg.Enabled || cfg.ID2MetaVerifyEnabled || cfg.Mobile3MetaDetailVerifyEnabled
 }
 
 func LogLevelFromEnv(name string, fallback slog.Level) slog.Level {

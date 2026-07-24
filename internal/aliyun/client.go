@@ -31,6 +31,8 @@ type endpointClient struct {
 type aliyunSDK interface {
 	InitFaceVerify(request *cloudauth.InitFaceVerifyRequest) (*cloudauth.InitFaceVerifyResponse, error)
 	DescribeFaceVerify(request *cloudauth.DescribeFaceVerifyRequest) (*cloudauth.DescribeFaceVerifyResponse, error)
+	Id2MetaVerify(request *cloudauth.Id2MetaVerifyRequest) (*cloudauth.Id2MetaVerifyResponse, error)
+	Mobile3MetaDetailVerify(request *cloudauth.Mobile3MetaDetailVerifyRequest) (*cloudauth.Mobile3MetaDetailVerifyResponse, error)
 }
 
 type InitializeRequest struct {
@@ -53,15 +55,39 @@ type QueryResponse struct {
 	Passed string
 }
 
+type ID2MetaVerifyRequest struct {
+	Name     string
+	IDNumber string
+}
+
+type Mobile3MetaDetailVerifyRequest struct {
+	Name     string
+	IDNumber string
+	Mobile   string
+}
+
+type InfoVerifyResponse struct {
+	Passed    bool
+	Code      string
+	BizCode   string
+	SubCode   string
+	ISPName   string
+	Message   string
+	RequestID string
+}
+
 func NewClient(cfg config.AliyunConfig) (*Client, error) {
-	if !cfg.Enabled {
+	if !aliyunAPIEnabled(cfg) {
 		return nil, nil
 	}
-	if cfg.AccessKeyID == "" || cfg.AccessKeySecret == "" || cfg.SceneID <= 0 {
-		return nil, errors.New("aliyun kyc credentials and scene id are required")
+	if cfg.AccessKeyID == "" || cfg.AccessKeySecret == "" {
+		return nil, errors.New("aliyun access key id and secret are required")
+	}
+	if cfg.Enabled && cfg.SceneID <= 0 {
+		return nil, errors.New("aliyun kyc scene id is required")
 	}
 	if len(cfg.Endpoints) == 0 {
-		return nil, errors.New("aliyun kyc endpoints are required")
+		return nil, errors.New("aliyun endpoints are required")
 	}
 	clients := make([]*endpointClient, 0, len(cfg.Endpoints))
 	for _, endpoint := range cfg.Endpoints {
@@ -77,7 +103,7 @@ func NewClient(cfg config.AliyunConfig) (*Client, error) {
 		clients = append(clients, &endpointClient{endpoint: endpoint, client: sdk})
 	}
 	if len(clients) == 0 {
-		return nil, errors.New("aliyun kyc endpoints are required")
+		return nil, errors.New("aliyun endpoints are required")
 	}
 	return &Client{
 		clients:     clients,
@@ -87,6 +113,10 @@ func NewClient(cfg config.AliyunConfig) (*Client, error) {
 		certType:    firstNonEmpty(cfg.CertType, "IDENTITY_CARD"),
 		returnURL:   cfg.ReturnURL,
 	}, nil
+}
+
+func aliyunAPIEnabled(cfg config.AliyunConfig) bool {
+	return cfg.Enabled || cfg.ID2MetaVerifyEnabled || cfg.Mobile3MetaDetailVerifyEnabled
 }
 
 func newOpenAPIConfig(cfg config.AliyunConfig, endpoint string) *openapiutil.Config {
@@ -216,6 +246,116 @@ func (c *Client) Query(ctx context.Context, certifyID string) (QueryResponse, er
 	return QueryResponse{}, errors.New("aliyun query failed")
 }
 
+func (c *Client) VerifyID2Meta(ctx context.Context, req ID2MetaVerifyRequest) (InfoVerifyResponse, error) {
+	if c == nil {
+		return InfoVerifyResponse{}, errors.New("aliyun client is not configured")
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.IDNumber = strings.TrimSpace(req.IDNumber)
+	if req.Name == "" || req.IDNumber == "" {
+		return InfoVerifyResponse{}, errors.New("aliyun id2 meta verify requires name and id number")
+	}
+	request := &cloudauth.Id2MetaVerifyRequest{
+		UserName:    stringPtr(req.Name),
+		IdentifyNum: stringPtr(req.IDNumber),
+		ParamType:   stringPtr("normal"),
+	}
+	var lastErr error
+	for _, item := range c.clients {
+		if err := ctx.Err(); err != nil {
+			return InfoVerifyResponse{}, err
+		}
+		resp, err := item.client.Id2MetaVerify(request)
+		if err != nil {
+			lastErr = fmt.Errorf("aliyun id2 meta endpoint=%s request failed", item.endpoint)
+			continue
+		}
+		body := resp.GetBody()
+		if body == nil {
+			lastErr = fmt.Errorf("aliyun id2 meta endpoint=%s missing response body", item.endpoint)
+			continue
+		}
+		if body.GetCode() == nil || *body.GetCode() != "200" {
+			lastErr = fmt.Errorf("aliyun id2 meta endpoint=%s code=%s", item.endpoint, safeString(body.GetCode()))
+			continue
+		}
+		result := body.GetResultObject()
+		if result == nil || result.GetBizCode() == nil {
+			lastErr = fmt.Errorf("aliyun id2 meta endpoint=%s missing verification result", item.endpoint)
+			continue
+		}
+		bizCode := strings.TrimSpace(*result.GetBizCode())
+		return InfoVerifyResponse{
+			Passed:    bizCode == "1",
+			Code:      safeValue(body.GetCode()),
+			BizCode:   bizCode,
+			Message:   safeValue(body.GetMessage()),
+			RequestID: safeValue(body.GetRequestId()),
+		}, nil
+	}
+	if lastErr != nil {
+		return InfoVerifyResponse{}, lastErr
+	}
+	return InfoVerifyResponse{}, errors.New("aliyun id2 meta verification failed")
+}
+
+func (c *Client) VerifyMobile3MetaDetail(ctx context.Context, req Mobile3MetaDetailVerifyRequest) (InfoVerifyResponse, error) {
+	if c == nil {
+		return InfoVerifyResponse{}, errors.New("aliyun client is not configured")
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.IDNumber = strings.TrimSpace(req.IDNumber)
+	req.Mobile = strings.TrimSpace(req.Mobile)
+	if req.Name == "" || req.IDNumber == "" || req.Mobile == "" {
+		return InfoVerifyResponse{}, errors.New("aliyun mobile3 detail verify requires name, id number, and mobile")
+	}
+	request := &cloudauth.Mobile3MetaDetailVerifyRequest{
+		UserName:    stringPtr(req.Name),
+		IdentifyNum: stringPtr(req.IDNumber),
+		Mobile:      stringPtr(req.Mobile),
+		ParamType:   stringPtr("normal"),
+	}
+	var lastErr error
+	for _, item := range c.clients {
+		if err := ctx.Err(); err != nil {
+			return InfoVerifyResponse{}, err
+		}
+		resp, err := item.client.Mobile3MetaDetailVerify(request)
+		if err != nil {
+			lastErr = fmt.Errorf("aliyun mobile3 detail endpoint=%s request failed", item.endpoint)
+			continue
+		}
+		body := resp.GetBody()
+		if body == nil {
+			lastErr = fmt.Errorf("aliyun mobile3 detail endpoint=%s missing response body", item.endpoint)
+			continue
+		}
+		if body.GetCode() == nil || *body.GetCode() != "200" {
+			lastErr = fmt.Errorf("aliyun mobile3 detail endpoint=%s code=%s", item.endpoint, safeString(body.GetCode()))
+			continue
+		}
+		result := body.GetResultObject()
+		if result == nil || result.GetBizCode() == nil {
+			lastErr = fmt.Errorf("aliyun mobile3 detail endpoint=%s missing verification result", item.endpoint)
+			continue
+		}
+		bizCode := strings.TrimSpace(*result.GetBizCode())
+		return InfoVerifyResponse{
+			Passed:    bizCode == "1",
+			Code:      safeValue(body.GetCode()),
+			BizCode:   bizCode,
+			SubCode:   safeValue(result.GetSubCode()),
+			ISPName:   safeValue(result.GetIspName()),
+			Message:   safeValue(body.GetMessage()),
+			RequestID: safeValue(body.GetRequestId()),
+		}, nil
+	}
+	if lastErr != nil {
+		return InfoVerifyResponse{}, lastErr
+	}
+	return InfoVerifyResponse{}, errors.New("aliyun mobile3 detail verification failed")
+}
+
 func stringPtr(value string) *string {
 	return &value
 }
@@ -231,6 +371,13 @@ func optionalStringPtr(value string) *string {
 func safeString(value *string) string {
 	if value == nil || strings.TrimSpace(*value) == "" {
 		return "<empty>"
+	}
+	return strings.TrimSpace(*value)
+}
+
+func safeValue(value *string) string {
+	if value == nil {
+		return ""
 	}
 	return strings.TrimSpace(*value)
 }

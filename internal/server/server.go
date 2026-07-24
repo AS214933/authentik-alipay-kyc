@@ -8,9 +8,11 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +35,9 @@ const (
 	AlipayPendingTTL  = 23 * time.Hour
 	AliyunPendingTTL  = 30 * time.Minute
 	AdminKYCInviteTTL = 24 * time.Hour
+
+	AliyunID2PrecheckCooldown   = 30 * time.Second
+	AliyunID2PrecheckDailyLimit = 6
 )
 
 const authentikMFASettingsPath = `/if/user/#/settings;%7B"page"%3A"page-mfa"%2C"ak-user-settings-mfa-page"%3A0%7D`
@@ -45,6 +50,7 @@ type OIDCClient interface {
 type AuthentikClient interface {
 	GetUser(ctx context.Context, userID string) (authentik.User, error)
 	HasSMSDevice(ctx context.Context, userID string) (bool, error)
+	SMSDevice(ctx context.Context, userID string) (authentik.SMSDevice, error)
 	AddUserToGroup(ctx context.Context, groupUUID, userID string) error
 	VerifiedUserIDs(ctx context.Context) ([]string, error)
 	MarkVerified(ctx context.Context, userID string, attr authentik.KYCAttribute) error
@@ -59,6 +65,8 @@ type AlipayClient interface {
 type AliyunClient interface {
 	Initialize(ctx context.Context, req aliyunkyc.InitializeRequest) (aliyunkyc.InitializeResponse, error)
 	Query(ctx context.Context, certifyID string) (aliyunkyc.QueryResponse, error)
+	VerifyID2Meta(ctx context.Context, req aliyunkyc.ID2MetaVerifyRequest) (aliyunkyc.InfoVerifyResponse, error)
+	VerifyMobile3MetaDetail(ctx context.Context, req aliyunkyc.Mobile3MetaDetailVerifyRequest) (aliyunkyc.InfoVerifyResponse, error)
 }
 
 type StatsStore interface {
@@ -98,9 +106,11 @@ type Server struct {
 	sessions  *session.Store
 	pendingMu sync.Mutex
 	settleMu  sync.Mutex
+	verifyMu  sync.Mutex
 	pending   map[string]pendingKYC
 	terminal  map[string]terminalKYC
 	invites   map[string]kycInvite
+	verifyRL  map[string]verifyRateLimit
 }
 
 type errorResponse struct {
@@ -170,6 +180,12 @@ type kycInvite struct {
 	ExpiresAt  time.Time
 }
 
+type verifyRateLimit struct {
+	Day   string
+	Count int
+	Last  time.Time
+}
+
 func New(deps Dependencies) *Server {
 	logger := deps.Logger
 	if logger == nil {
@@ -195,6 +211,7 @@ func New(deps Dependencies) *Server {
 		pending:   map[string]pendingKYC{},
 		terminal:  map[string]terminalKYC{},
 		invites:   map[string]kycInvite{},
+		verifyRL:  map[string]verifyRateLimit{},
 	}
 }
 
@@ -228,6 +245,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/admin/user-mfa", s.adminUserMFA)
 	mux.HandleFunc("POST /api/admin/import", s.adminImport)
 	mux.HandleFunc("POST /api/admin/sync-group", s.adminSyncGroup)
+	mux.HandleFunc("POST /api/admin/aliyun/id2-meta-verify", s.adminAliyunID2MetaVerify)
+	mux.HandleFunc("POST /api/admin/aliyun/mobile3-meta-detail-verify", s.adminAliyunMobile3MetaDetailVerify)
 	mux.HandleFunc("GET /api/kyc/invite", s.kycInvite)
 	mux.HandleFunc("POST /api/kyc/start", s.startKYC)
 	mux.HandleFunc("POST /api/kyc/confirm", s.confirmKYC)
@@ -399,11 +418,13 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 	authenticated := stringValue(sess.Values[session.UserIDKey]) != ""
 	allowed := s.adminAllowedSession(sess.Values)
 	response := map[string]interface{}{
-		"enabled":            s.cfg.Admin.Enabled,
-		"authenticated":      authenticated,
-		"allowed":            allowed,
-		"group_sync_enabled": s.verifiedGroupConfigured(),
-		"login_url":          s.cfg.PublicURL + "/auth/login?return_to=%2Fadmin",
+		"enabled":                        s.cfg.Admin.Enabled,
+		"authenticated":                  authenticated,
+		"allowed":                        allowed,
+		"group_sync_enabled":             s.verifiedGroupConfigured(),
+		"aliyun_id2_meta_verify_enabled": s.aliyunID2MetaVerifyEnabled(),
+		"aliyun_mobile3_meta_detail_verify_enabled": s.aliyunMobile3MetaDetailVerifyEnabled(),
+		"login_url": s.cfg.PublicURL + "/auth/login?return_to=%2Fadmin",
 	}
 	if allowed {
 		token, err := s.ensureAdminCSRFToken(r, w, sess.Values)
@@ -430,16 +451,20 @@ func (s *Server) adminUserMFA(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "user_id is required")
 		return
 	}
-	bound, err := s.authentik.HasSMSDevice(r.Context(), userID)
+	device, err := s.authentik.SMSDevice(r.Context(), userID)
 	if err != nil {
 		s.logger.Warn("failed to load authentik mfa devices", "user_id", userID, "error", err)
 		writeError(w, http.StatusBadGateway, "failed to load authentik mfa devices")
 		return
 	}
+	mobile := normalizeMobile(device.PhoneNumber)
+	mobileAvailable := device.Bound && validMainlandMobile(mobile)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"user_id":          userID,
-		"sms_mfa_bound":    bound,
-		"mfa_settings_url": s.authentikMFASettingsURL(),
+		"user_id":              userID,
+		"sms_mfa_bound":        device.Bound,
+		"sms_mobile_available": mobileAvailable,
+		"sms_mobile_masked":    maskMobile(mobile),
+		"mfa_settings_url":     s.authentikMFASettingsURL(),
 	})
 }
 
@@ -474,8 +499,8 @@ func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if len(idNumber) != 15 && len(idNumber) != 18 {
-		writeError(w, http.StatusBadRequest, "id_number must be a 15 or 18 character identity card number")
+	if !identitycrypto.ValidIDNumber(idNumber) {
+		writeError(w, http.StatusBadRequest, "id_number must be a valid mainland China identity card number")
 		return
 	}
 	requiresKYC := true
@@ -562,6 +587,111 @@ func (s *Server) adminSyncGroup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) adminAliyunID2MetaVerify(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.Admin.Enabled {
+		writeError(w, http.StatusNotFound, "admin import is disabled")
+		return
+	}
+	if !s.adminAuthorized(r) || !s.validAdminCSRF(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !s.aliyunID2MetaVerifyEnabled() {
+		writeError(w, http.StatusNotFound, "aliyun identity two-factor verification is disabled")
+		return
+	}
+	var req struct {
+		Name     string `json:"name"`
+		IDNumber string `json:"id_number"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	name, idNumber, ok := validateIdentityInput(w, req.Name, req.IDNumber)
+	if !ok {
+		return
+	}
+	resp, err := s.aliyun.VerifyID2Meta(r.Context(), aliyunkyc.ID2MetaVerifyRequest{
+		Name:     name,
+		IDNumber: idNumber,
+	})
+	if err != nil {
+		s.logger.Warn("aliyun id2 meta verify failed", "error", err)
+		writeError(w, http.StatusBadGateway, "failed to run aliyun identity two-factor verification")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"type":   "id2_meta_verify",
+		"result": aliyunInfoVerifyPayload(resp),
+	})
+}
+
+func (s *Server) adminAliyunMobile3MetaDetailVerify(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.Admin.Enabled {
+		writeError(w, http.StatusNotFound, "admin import is disabled")
+		return
+	}
+	if !s.adminAuthorized(r) || !s.validAdminCSRF(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !s.aliyunMobile3MetaDetailVerifyEnabled() {
+		writeError(w, http.StatusNotFound, "aliyun mobile three-factor detail verification is disabled")
+		return
+	}
+	var req struct {
+		UserID   string `json:"user_id"`
+		Name     string `json:"name"`
+		IDNumber string `json:"id_number"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	userID := strings.TrimSpace(req.UserID)
+	if userID == "" {
+		writeError(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+	name, idNumber, ok := validateIdentityInput(w, req.Name, req.IDNumber)
+	if !ok {
+		return
+	}
+	device, err := s.authentik.SMSDevice(r.Context(), userID)
+	if err != nil {
+		s.logger.Warn("failed to load authentik sms device for mobile3 verify", "user_id", userID, "error", err)
+		writeError(w, http.StatusBadGateway, "failed to load authentik mfa devices")
+		return
+	}
+	if !device.Bound {
+		writeJSON(w, http.StatusPreconditionRequired, map[string]string{
+			"error":   "sms_mfa_required",
+			"message": "该用户未绑定手机号",
+		})
+		return
+	}
+	mobile := normalizeMobile(device.PhoneNumber)
+	if !validMainlandMobile(mobile) {
+		writeError(w, http.StatusBadRequest, "the bound SMS device phone number cannot be used for mobile three-factor verification")
+		return
+	}
+	resp, err := s.aliyun.VerifyMobile3MetaDetail(r.Context(), aliyunkyc.Mobile3MetaDetailVerifyRequest{
+		Name:     name,
+		IDNumber: idNumber,
+		Mobile:   mobile,
+	})
+	if err != nil {
+		s.logger.Warn("aliyun mobile3 detail verify failed", "error", err)
+		writeError(w, http.StatusBadGateway, "failed to run aliyun mobile three-factor detail verification")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"type":   "mobile3_meta_detail_verify",
+		"result": aliyunInfoVerifyPayload(resp),
+	})
+}
+
 func (s *Server) kycInvite(w http.ResponseWriter, r *http.Request) {
 	invite, ok := s.kycInviteByToken(r.URL.Query().Get("token"))
 	if !ok {
@@ -623,8 +753,21 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if len(idNumber) != 15 && len(idNumber) != 18 {
-		writeError(w, http.StatusBadRequest, "id_number must be a 15 or 18 character identity card number")
+	if !identitycrypto.ValidIDNumber(idNumber) {
+		writeError(w, http.StatusBadRequest, "id_number must be a valid mainland China identity card number")
+		return
+	}
+	provider := s.requestedProvider(req.Provider)
+	if !s.providerEnabled(provider) {
+		writeError(w, http.StatusBadRequest, "unsupported verification provider")
+		return
+	}
+	if provider == ProviderAliyun && strings.TrimSpace(req.MetaInfo) == "" {
+		writeError(w, http.StatusBadRequest, "meta_info is required for aliyun verification")
+		return
+	}
+	if provider == ProviderAliyun && !validAliyunCertifyURLType(req.CertifyURLType) {
+		writeError(w, http.StatusBadRequest, "certify_url_type must be WEB or H5 for aliyun verification")
 		return
 	}
 	smsMFA, err := s.authentik.HasSMSDevice(r.Context(), userID)
@@ -637,6 +780,35 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 		writeSMSMFARequired(w, s.authentikMFASettingsURL())
 		return
 	}
+	if provider == ProviderAliyun && s.cfg.Aliyun.ID2MetaVerifyEnabled {
+		retryAfter, ok := s.allowAliyunID2Precheck(r, userID)
+		if !ok {
+			writeRateLimited(w, retryAfter)
+			return
+		}
+		verifyResp, err := s.aliyun.VerifyID2Meta(r.Context(), aliyunkyc.ID2MetaVerifyRequest{
+			Name:     req.Name,
+			IDNumber: idNumber,
+		})
+		if err != nil {
+			s.logger.Warn("aliyun id2 precheck failed", "user_id", userID, "error", err)
+			writeError(w, http.StatusBadGateway, "failed to run aliyun identity precheck")
+			return
+		}
+		if !verifyResp.Passed {
+			if err := s.abandonCurrentKYC(r, w, sess.Values); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to clear verification session")
+				return
+			}
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
+				"error":         "aliyun_id2_meta_verify_failed",
+				"message":       "身份二要素核验未通过，请确认身份信息后重新开始认证。",
+				"reset_session": true,
+				"result":        aliyunInfoVerifyPayload(verifyResp),
+			})
+			return
+		}
+	}
 	s.recordTotal()
 	state, err := oidc.RandomToken()
 	if err != nil {
@@ -648,22 +820,6 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.recordFailure()
 		writeError(w, http.StatusInternalServerError, "failed to create order number")
-		return
-	}
-	provider := s.requestedProvider(req.Provider)
-	if !s.providerEnabled(provider) {
-		s.recordFailure()
-		writeError(w, http.StatusBadRequest, "unsupported verification provider")
-		return
-	}
-	if provider == ProviderAliyun && strings.TrimSpace(req.MetaInfo) == "" {
-		s.recordFailure()
-		writeError(w, http.StatusBadRequest, "meta_info is required for aliyun verification")
-		return
-	}
-	if provider == ProviderAliyun && !validAliyunCertifyURLType(req.CertifyURLType) {
-		s.recordFailure()
-		writeError(w, http.StatusBadRequest, "certify_url_type must be WEB or H5 for aliyun verification")
 		return
 	}
 	outerOrderNo := "ak" + time.Now().UTC().Format("20060102150405") + orderToken[:16]
@@ -1060,6 +1216,58 @@ func (s *Server) providerEnabled(provider string) bool {
 	return false
 }
 
+func (s *Server) aliyunID2MetaVerifyEnabled() bool {
+	return s.cfg.Aliyun.ID2MetaVerifyEnabled && s.aliyun != nil
+}
+
+func (s *Server) aliyunMobile3MetaDetailVerifyEnabled() bool {
+	return s.cfg.Aliyun.Mobile3MetaDetailVerifyEnabled && s.aliyun != nil
+}
+
+func (s *Server) allowAliyunID2Precheck(r *http.Request, userID string) (time.Duration, bool) {
+	now := time.Now().UTC()
+	day := now.Format("2006-01-02")
+	key := strings.Join([]string{"aliyun-id2", strings.TrimSpace(userID), clientIP(r)}, "|")
+
+	s.verifyMu.Lock()
+	defer s.verifyMu.Unlock()
+	if s.verifyRL == nil {
+		s.verifyRL = map[string]verifyRateLimit{}
+	}
+	if len(s.verifyRL) > 10000 {
+		for itemKey, item := range s.verifyRL {
+			if item.Day != day {
+				delete(s.verifyRL, itemKey)
+			}
+		}
+	}
+	item := s.verifyRL[key]
+	if item.Day != day {
+		item = verifyRateLimit{Day: day}
+	}
+	if item.Count >= AliyunID2PrecheckDailyLimit {
+		return time.Hour, false
+	}
+	if !item.Last.IsZero() {
+		elapsed := now.Sub(item.Last)
+		if elapsed < AliyunID2PrecheckCooldown {
+			return AliyunID2PrecheckCooldown - elapsed, false
+		}
+	}
+	item.Count++
+	item.Last = now
+	s.verifyRL[key] = item
+	return 0, true
+}
+
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil && host != "" {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
+}
+
 func (s *Server) authentikMFASettingsURL() string {
 	return strings.TrimRight(s.cfg.Authentik.BaseURL, "/") + authentikMFASettingsPath
 }
@@ -1135,6 +1343,9 @@ func (s *Server) recordVerifiedIdentity(ctx context.Context, identity verifiedId
 	identity.Channel = strings.TrimSpace(identity.Channel)
 	if identity.UserID == "" || identity.Name == "" || identity.IDNumber == "" || identity.Channel == "" {
 		return authentik.KYCAttribute{}, errors.New("verified identity is missing required fields")
+	}
+	if !identitycrypto.ValidIDNumber(identity.IDNumber) {
+		return authentik.KYCAttribute{}, errors.New("verified identity id number is invalid")
 	}
 	idHash := identitycrypto.IDHash(identity.IDNumber, s.cfg.HashPepper)
 	if s.pii != nil {
@@ -1264,6 +1475,10 @@ func (s *Server) pendingKYCFromSession(values map[interface{}]interface{}, state
 }
 
 func (s *Server) createKYCInvite(userID, name, idNumber string) (kycInvite, error) {
+	idNumber = identitycrypto.NormalizeIDNumber(idNumber)
+	if !identitycrypto.ValidIDNumber(idNumber) {
+		return kycInvite{}, errors.New("kyc invite id number is invalid")
+	}
 	token, err := oidc.RandomToken()
 	if err != nil {
 		return kycInvite{}, err
@@ -1272,7 +1487,7 @@ func (s *Server) createKYCInvite(userID, name, idNumber string) (kycInvite, erro
 		Token:      token,
 		UserID:     strings.TrimSpace(userID),
 		Name:       strings.TrimSpace(name),
-		IDNumber:   identitycrypto.NormalizeIDNumber(idNumber),
+		IDNumber:   idNumber,
 		NameMasked: identitycrypto.MaskChineseName(name),
 		IDLast4:    identitycrypto.Last4(idNumber),
 		ExpiresAt:  time.Now().UTC().Add(AdminKYCInviteTTL),
@@ -1465,6 +1680,13 @@ func (s *Server) clearPendingKYC(r *http.Request, w http.ResponseWriter) error {
 	})
 }
 
+func (s *Server) abandonCurrentKYC(r *http.Request, w http.ResponseWriter, values map[interface{}]interface{}) error {
+	if state := stringValue(values[session.KYCStateKey]); state != "" {
+		s.finishPendingKYC(state, terminalKYC{Expired: true})
+	}
+	return s.clearPendingKYC(r, w)
+}
+
 func readJSON(r *http.Request, out interface{}) error {
 	defer r.Body.Close()
 	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
@@ -1486,6 +1708,15 @@ func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, errorResponse{Error: message})
+}
+
+func writeRateLimited(w http.ResponseWriter, retryAfter time.Duration) {
+	seconds := int(retryAfter.Round(time.Second).Seconds())
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试。")
 }
 
 func writeSMSMFARequired(w http.ResponseWriter, settingsURL string) {
@@ -1566,6 +1797,94 @@ func validAliyunCertifyURLType(value string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func validateIdentityInput(w http.ResponseWriter, nameInput, idInput string) (string, string, bool) {
+	name := strings.TrimSpace(nameInput)
+	idNumber := identitycrypto.NormalizeIDNumber(idInput)
+	if name == "" || len([]rune(name)) > 64 {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return "", "", false
+	}
+	if !identitycrypto.ValidIDNumber(idNumber) {
+		writeError(w, http.StatusBadRequest, "id_number must be a valid mainland China identity card number")
+		return "", "", false
+	}
+	return name, idNumber, true
+}
+
+func normalizeMobile(value string) string {
+	value = strings.TrimSpace(value)
+	replacer := strings.NewReplacer(" ", "", "-", "", "\t", "", "\r", "", "\n", "", "(", "", ")", "")
+	value = replacer.Replace(value)
+	value = strings.TrimPrefix(value, "+86")
+	value = strings.TrimPrefix(value, "0086")
+	if strings.HasPrefix(value, "86") && len(value) == 13 {
+		value = strings.TrimPrefix(value, "86")
+	}
+	return value
+}
+
+func validMainlandMobile(value string) bool {
+	if len(value) != 11 || !strings.HasPrefix(value, "1") {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func maskMobile(value string) string {
+	value = normalizeMobile(value)
+	if !validMainlandMobile(value) {
+		return ""
+	}
+	return value[:3] + "****" + value[7:]
+}
+
+func aliyunInfoVerifyPayload(resp aliyunkyc.InfoVerifyResponse) map[string]interface{} {
+	return map[string]interface{}{
+		"passed":           resp.Passed,
+		"code":             resp.Code,
+		"biz_code":         resp.BizCode,
+		"sub_code":         resp.SubCode,
+		"isp_name":         resp.ISPName,
+		"message":          aliyunInfoVerifyMessage(resp),
+		"upstream_message": resp.Message,
+		"request_id":       resp.RequestID,
+	}
+}
+
+func aliyunInfoVerifyMessage(resp aliyunkyc.InfoVerifyResponse) string {
+	if resp.SubCode != "" {
+		switch resp.SubCode {
+		case "101":
+			return "手机号三要素核验一致"
+		case "201":
+			return "手机号三要素核验不一致"
+		default:
+			if resp.Passed {
+				return "手机号三要素核验通过"
+			}
+			return "手机号三要素核验未通过"
+		}
+	}
+	switch resp.BizCode {
+	case "1":
+		return "身份二要素核验一致"
+	case "2":
+		return "身份二要素核验不一致"
+	case "3":
+		return "身份二要素未查到记录"
+	default:
+		if resp.Passed {
+			return "核验通过"
+		}
+		return "核验未通过"
 	}
 }
 

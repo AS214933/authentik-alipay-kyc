@@ -119,6 +119,10 @@ h2 {
 .secondary {
   width: 100%;
   min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
   border: 1px solid #b9c2ce;
   border-radius: 8px;
   background: #ffffff;
@@ -343,6 +347,17 @@ select:focus {
   margin-top: 16px;
 }
 
+.admin-verify-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.admin-verify-actions .field-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
 .admin-invite,
 .preset-box {
   display: grid;
@@ -405,6 +420,58 @@ select:focus {
   color: #0f6b56;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(23, 32, 42, 0.42);
+}
+
+.modal-card {
+  width: min(100%, 560px);
+  display: grid;
+  gap: 16px;
+  padding: 22px;
+  border: 1px solid #d7dde4;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 22px 70px rgba(23, 32, 42, 0.22);
+}
+
+.modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.verify-status {
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-weight: 800;
+}
+
+.verify-status.passed {
+  background: #dff6ec;
+  color: #0f6b56;
+}
+
+.verify-status.failed {
+  background: #fff4d9;
+  color: #8a5b00;
+}
+
+.verify-result-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .spin {
   animation: spin 1s linear infinite;
 }
@@ -435,7 +502,8 @@ select:focus {
 
   .account-row,
   .result-grid,
-  .form-grid {
+  .form-grid,
+  .admin-verify-actions {
     grid-template-columns: 1fr;
   }
 

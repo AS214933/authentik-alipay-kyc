@@ -49,10 +49,18 @@ type KYCAttribute struct {
 }
 
 type authenticatorDevice struct {
-	Type          string `json:"type"`
-	MetaModelName string `json:"meta_model_name"`
-	VerboseName   string `json:"verbose_name"`
-	Confirmed     bool   `json:"confirmed"`
+	Type          string          `json:"type"`
+	MetaModelName string          `json:"meta_model_name"`
+	VerboseName   string          `json:"verbose_name"`
+	Confirmed     bool            `json:"confirmed"`
+	PK            json.RawMessage `json:"pk"`
+	PhoneNumber   string          `json:"phone_number"`
+	Phone         string          `json:"phone"`
+}
+
+type SMSDevice struct {
+	Bound       bool
+	PhoneNumber string
 }
 
 func NewClient(cfg config.AuthentikConfig) *Client {
@@ -90,28 +98,7 @@ func (c *Client) GetUser(ctx context.Context, userID string) (User, error) {
 }
 
 func (c *Client) HasSMSDevice(ctx context.Context, userID string) (bool, error) {
-	userID = strings.TrimSpace(userID)
-	if userID == "" {
-		return false, fmt.Errorf("authentik sms device lookup requires user id")
-	}
-	reqURL := c.baseURL + "/api/v3/authenticators/admin/all/?user=" + url.QueryEscape(userID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return false, err
-	}
-	c.auth(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return false, fmt.Errorf("authentik sms device lookup failed: status=%d body=%s", resp.StatusCode, safeBodySummary(body))
-	}
-
-	devices, err := parseAuthenticatorDevices(body)
+	devices, err := c.authenticatorDevices(ctx, userID)
 	if err != nil {
 		return false, err
 	}
@@ -121,6 +108,80 @@ func (c *Client) HasSMSDevice(ctx context.Context, userID string) (bool, error) 
 		}
 	}
 	return false, nil
+}
+
+func (c *Client) SMSDevice(ctx context.Context, userID string) (SMSDevice, error) {
+	devices, err := c.authenticatorDevices(ctx, userID)
+	if err != nil {
+		return SMSDevice{}, err
+	}
+	for _, device := range devices {
+		if !device.Confirmed || !device.isSMS() {
+			continue
+		}
+		phoneNumber := device.smsPhoneNumber()
+		if phoneNumber == "" {
+			detail, err := c.smsDeviceDetail(ctx, device.pkString())
+			if err != nil {
+				return SMSDevice{}, err
+			}
+			phoneNumber = detail.smsPhoneNumber()
+		}
+		return SMSDevice{Bound: true, PhoneNumber: phoneNumber}, nil
+	}
+	return SMSDevice{}, nil
+}
+
+func (c *Client) authenticatorDevices(ctx context.Context, userID string) ([]authenticatorDevice, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, fmt.Errorf("authentik sms device lookup requires user id")
+	}
+	reqURL := c.baseURL + "/api/v3/authenticators/admin/all/?user=" + url.QueryEscape(userID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.auth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("authentik sms device lookup failed: status=%d body=%s", resp.StatusCode, safeBodySummary(body))
+	}
+	return parseAuthenticatorDevices(body)
+}
+
+func (c *Client) smsDeviceDetail(ctx context.Context, pk string) (authenticatorDevice, error) {
+	pk = strings.TrimSpace(pk)
+	if pk == "" {
+		return authenticatorDevice{}, nil
+	}
+	reqURL := c.baseURL + "/api/v3/authenticators/admin/sms/" + url.PathEscape(pk) + "/"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return authenticatorDevice{}, err
+	}
+	c.auth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return authenticatorDevice{}, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return authenticatorDevice{}, fmt.Errorf("authentik sms device detail failed: status=%d body=%s", resp.StatusCode, safeBodySummary(body))
+	}
+	var device authenticatorDevice
+	if err := json.Unmarshal(body, &device); err != nil {
+		return authenticatorDevice{}, err
+	}
+	return device, nil
 }
 
 func (c *Client) AddUserToGroup(ctx context.Context, groupUUID, userID string) error {
@@ -303,6 +364,30 @@ func (d authenticatorDevice) isSMS() bool {
 		}
 	}
 	return false
+}
+
+func (d authenticatorDevice) pkString() string {
+	if len(d.PK) == 0 {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(d.PK, &text); err == nil {
+		return strings.TrimSpace(text)
+	}
+	var number int64
+	if err := json.Unmarshal(d.PK, &number); err == nil {
+		return strconv.FormatInt(number, 10)
+	}
+	return ""
+}
+
+func (d authenticatorDevice) smsPhoneNumber() string {
+	for _, value := range []string{d.PhoneNumber, d.Phone} {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (c *Client) auth(req *http.Request) {

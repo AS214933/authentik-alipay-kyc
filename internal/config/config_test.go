@@ -209,6 +209,35 @@ func TestLoadAcceptsAliyunConfigWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestLoadReadsAliyunMetaVerifyFeatureFlags(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ALIYUN_ACCESS_KEY_ID", "ak")
+	t.Setenv("ALIYUN_ACCESS_KEY_SECRET", "secret")
+	t.Setenv("ALIYUN_ID2_META_VERIFY_ENABLED", "true")
+	t.Setenv("ALIYUN_MOBILE3_META_DETAIL_VERIFY_ENABLED", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Aliyun.ID2MetaVerifyEnabled || !cfg.Aliyun.Mobile3MetaDetailVerifyEnabled {
+		t.Fatalf("unexpected aliyun meta verify flags: %+v", cfg.Aliyun)
+	}
+	if cfg.Aliyun.Enabled || cfg.Aliyun.SceneID != 0 {
+		t.Fatalf("aliyun meta verify flags should not force kyc scene: %+v", cfg.Aliyun)
+	}
+}
+
+func TestLoadRequiresAliyunCredentialsWhenMetaVerifyEnabled(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("ALIYUN_ID2_META_VERIFY_ENABLED", "true")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "ALIYUN_ACCESS_KEY_ID") {
+		t.Fatalf("Load error = %v, want aliyun access key requirement", err)
+	}
+}
+
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("PUBLIC_URL", "https://kyc.example.com")

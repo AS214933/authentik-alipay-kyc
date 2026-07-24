@@ -41,6 +41,8 @@ type fakeAuthentik struct {
 	attr             authentik.KYCAttribute
 	smsDeviceBound   *bool
 	smsDeviceByUser  map[string]bool
+	smsDevicePhone   string
+	smsPhoneByUser   map[string]string
 	smsDeviceErr     error
 	smsLookupUserID  []string
 	groupUsers       []string
@@ -66,6 +68,21 @@ func (f *fakeAuthentik) HasSMSDevice(_ context.Context, userID string) (bool, er
 		return *f.smsDeviceBound, nil
 	}
 	return true, nil
+}
+
+func (f *fakeAuthentik) SMSDevice(_ context.Context, userID string) (authentik.SMSDevice, error) {
+	f.smsLookupUserID = append(f.smsLookupUserID, userID)
+	if f.smsDeviceErr != nil {
+		return authentik.SMSDevice{}, f.smsDeviceErr
+	}
+	if f.smsDeviceByUser != nil {
+		bound := f.smsDeviceByUser[userID]
+		return authentik.SMSDevice{Bound: bound, PhoneNumber: f.smsPhoneByUser[userID]}, nil
+	}
+	if f.smsDeviceBound != nil {
+		return authentik.SMSDevice{Bound: *f.smsDeviceBound, PhoneNumber: f.smsDevicePhone}, nil
+	}
+	return authentik.SMSDevice{Bound: true, PhoneNumber: firstNonEmpty(f.smsDevicePhone, "+8613800138000")}, nil
 }
 
 func (f *fakeAuthentik) AddUserToGroup(_ context.Context, groupUUID, userID string) error {
@@ -140,10 +157,16 @@ type fakeAliyun struct {
 	certifyID      string
 	certifyURL     string
 	passed         string
+	id2Verify      aliyunkyc.InfoVerifyResponse
+	mobile3Verify  aliyunkyc.InfoVerifyResponse
 	initMetaInfo   string
 	initURLType    string
+	id2Req         aliyunkyc.ID2MetaVerifyRequest
+	mobile3Req     aliyunkyc.Mobile3MetaDetailVerifyRequest
 	initializeCall int
 	queryCall      int
+	id2Call        int
+	mobile3Call    int
 }
 
 func (f *fakeAliyun) Initialize(_ context.Context, req aliyunkyc.InitializeRequest) (aliyunkyc.InitializeResponse, error) {
@@ -162,6 +185,24 @@ func (f *fakeAliyun) Initialize(_ context.Context, req aliyunkyc.InitializeReque
 func (f *fakeAliyun) Query(context.Context, string) (aliyunkyc.QueryResponse, error) {
 	f.queryCall++
 	return aliyunkyc.QueryResponse{Passed: f.passed}, nil
+}
+
+func (f *fakeAliyun) VerifyID2Meta(_ context.Context, req aliyunkyc.ID2MetaVerifyRequest) (aliyunkyc.InfoVerifyResponse, error) {
+	f.id2Call++
+	f.id2Req = req
+	if f.id2Verify.Code == "" && f.id2Verify.BizCode == "" {
+		f.id2Verify = aliyunkyc.InfoVerifyResponse{Passed: true, Code: "200", BizCode: "1"}
+	}
+	return f.id2Verify, nil
+}
+
+func (f *fakeAliyun) VerifyMobile3MetaDetail(_ context.Context, req aliyunkyc.Mobile3MetaDetailVerifyRequest) (aliyunkyc.InfoVerifyResponse, error) {
+	f.mobile3Call++
+	f.mobile3Req = req
+	if f.mobile3Verify.Code == "" && f.mobile3Verify.BizCode == "" {
+		f.mobile3Verify = aliyunkyc.InfoVerifyResponse{Passed: true, Code: "200", BizCode: "1", SubCode: "101"}
+	}
+	return f.mobile3Verify, nil
 }
 
 type sequenceAliyun struct {
@@ -455,6 +496,197 @@ func TestAliyunKYCFlowWritesAuthentikAttribute(t *testing.T) {
 	}
 	if counters.Total != 1 || counters.Success != 1 || counters.Failure != 0 {
 		t.Fatalf("unexpected counters: %+v", counters)
+	}
+}
+
+func TestAliyunKYCStartRunsID2PrecheckWhenEnabled(t *testing.T) {
+	cfg := testConfig()
+	cfg.Aliyun.Enabled = true
+	cfg.Aliyun.ID2MetaVerifyEnabled = true
+	aliyunClient := &fakeAliyun{certifyID: "ALIYUN123", certifyURL: "https://aliyun.example/certify", passed: "T"}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    aliyunClient,
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"provider":"aliyun","name":"张三","id_number":"11010519491231002X","meta_info":"{}","certify_url_type":"WEB"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range userCookie(t, srv) {
+		req.AddCookie(cookie)
+	}
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if aliyunClient.id2Call != 1 || aliyunClient.initializeCall != 1 {
+		t.Fatalf("id2Call=%d initializeCall=%d, want 1/1", aliyunClient.id2Call, aliyunClient.initializeCall)
+	}
+	if aliyunClient.id2Req.Name != "张三" || aliyunClient.id2Req.IDNumber != "11010519491231002X" {
+		t.Fatalf("unexpected id2 precheck request: %+v", aliyunClient.id2Req)
+	}
+}
+
+func TestAliyunKYCID2PrecheckFailureClearsCurrentSession(t *testing.T) {
+	cfg := testConfig()
+	cfg.Aliyun.Enabled = true
+	cfg.Aliyun.ID2MetaVerifyEnabled = true
+	statsStore := testStats(t)
+	aliyunClient := &fakeAliyun{
+		id2Verify: aliyunkyc.InfoVerifyResponse{Passed: false, Code: "200", BizCode: "2"},
+		passed:    "T",
+	}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    aliyunClient,
+		Stats:     statsStore,
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	cookies := userCookie(t, srv)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"name":"张三","id_number":"11010519491231002X"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("alipay start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var first struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := srv.pendingKYC(first.State); !ok {
+		t.Fatalf("old pending state %q was not stored", first.State)
+	}
+	cookies = mergeCookies(cookies, rec.Result().Cookies())
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"provider":"aliyun","name":"张三","id_number":"11010519491231002X","meta_info":"{}","certify_url_type":"WEB"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("aliyun precheck status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error        string `json:"error"`
+		ResetSession bool   `json:"reset_session"`
+		Result       struct {
+			Passed  bool   `json:"passed"`
+			BizCode string `json:"biz_code"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error != "aliyun_id2_meta_verify_failed" || !body.ResetSession || body.Result.Passed || body.Result.BizCode != "2" {
+		t.Fatalf("unexpected precheck failure body: %+v", body)
+	}
+	if aliyunClient.id2Call != 1 || aliyunClient.initializeCall != 0 {
+		t.Fatalf("id2Call=%d initializeCall=%d, want 1/0", aliyunClient.id2Call, aliyunClient.initializeCall)
+	}
+	if _, ok := srv.pendingKYC(first.State); ok {
+		t.Fatalf("old pending state %q was not cleared", first.State)
+	}
+	counters, err := statsStore.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counters.Total != 1 || counters.Success != 0 || counters.Failure != 0 {
+		t.Fatalf("unexpected counters after precheck failure: %+v", counters)
+	}
+}
+
+func TestAliyunKYCID2PrecheckRateLimited(t *testing.T) {
+	cfg := testConfig()
+	cfg.Aliyun.Enabled = true
+	cfg.Aliyun.ID2MetaVerifyEnabled = true
+	aliyunClient := &fakeAliyun{certifyID: "ALIYUN123", certifyURL: "https://aliyun.example/certify", passed: "T"}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    aliyunClient,
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	cookies := userCookie(t, srv)
+
+	for attempt, want := range []int{http.StatusOK, http.StatusTooManyRequests} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"provider":"aliyun","name":"张三","id_number":"11010519491231002X","meta_info":"{}","certify_url_type":"WEB"}`))
+		req.Header.Set("Content-Type", "application/json")
+		for _, cookie := range cookies {
+			req.AddCookie(cookie)
+		}
+		handler.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Fatalf("attempt %d status = %d want %d body=%s", attempt+1, rec.Code, want, rec.Body.String())
+		}
+		cookies = mergeCookies(cookies, rec.Result().Cookies())
+	}
+	if aliyunClient.id2Call != 1 || aliyunClient.initializeCall != 1 {
+		t.Fatalf("id2Call=%d initializeCall=%d, want 1/1", aliyunClient.id2Call, aliyunClient.initializeCall)
+	}
+}
+
+func TestAliyunKYCStartRejectsInvalidIDBeforePrecheck(t *testing.T) {
+	cfg := testConfig()
+	cfg.Aliyun.Enabled = true
+	cfg.Aliyun.ID2MetaVerifyEnabled = true
+	aliyunClient := &fakeAliyun{passed: "T"}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    aliyunClient,
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"provider":"aliyun","name":"张三","id_number":"110105194912310021","meta_info":"{}","certify_url_type":"WEB"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range userCookie(t, srv) {
+		req.AddCookie(cookie)
+	}
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("start status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if aliyunClient.id2Call != 0 || aliyunClient.initializeCall != 0 {
+		t.Fatalf("id2Call=%d initializeCall=%d, want 0/0", aliyunClient.id2Call, aliyunClient.initializeCall)
 	}
 }
 
@@ -1495,6 +1727,48 @@ func TestAdminStatusReturnsAllowedWhenUsernameMatches(t *testing.T) {
 	}
 }
 
+func TestAdminStatusShowsAliyunVerifyFlagsWithoutAliyunKYCProvider(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.AllowedUsernames = []string{"admin"}
+	cfg.Aliyun.Enabled = false
+	cfg.Aliyun.ID2MetaVerifyEnabled = true
+	cfg.Aliyun.Mobile3MetaDetailVerifyEnabled = true
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    &fakeAliyun{},
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS:  http.FS(fstest.MapFS{"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()}}),
+	})
+	handler := srv.Handler()
+	cookies := adminCookie(t, srv, "admin")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		ID2MetaVerifyEnabled           bool `json:"aliyun_id2_meta_verify_enabled"`
+		Mobile3MetaDetailVerifyEnabled bool `json:"aliyun_mobile3_meta_detail_verify_enabled"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.ID2MetaVerifyEnabled || !body.Mobile3MetaDetailVerifyEnabled {
+		t.Fatalf("unexpected aliyun verify flags: %+v", body)
+	}
+}
+
 func TestAdminUserMFAReturnsSMSDeviceStatus(t *testing.T) {
 	cfg := testConfig()
 	cfg.Admin.Enabled = true
@@ -1540,6 +1814,251 @@ func TestAdminUserMFAReturnsSMSDeviceStatus(t *testing.T) {
 	}
 	if strings.Join(ak.smsLookupUserID, ",") != "5" {
 		t.Fatalf("sms lookup user ids = %+v, want 5", ak.smsLookupUserID)
+	}
+}
+
+func TestAdminUserMFAReturnsMaskedSMSMobileWhenAvailable(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.AllowedUsernames = []string{"admin"}
+	ak := &fakeAuthentik{
+		user:            authentik.User{Attributes: map[string]interface{}{}},
+		smsDeviceByUser: map[string]bool{"5": true},
+		smsPhoneByUser:  map[string]string{"5": "+8613800138000"},
+	}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: ak,
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS:  http.FS(fstest.MapFS{"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()}}),
+	})
+	handler := srv.Handler()
+	cookies := adminCookie(t, srv, "admin")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/user-mfa?user_id=5", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin user mfa status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		SMSMFABound        bool   `json:"sms_mfa_bound"`
+		SMSMobileAvailable bool   `json:"sms_mobile_available"`
+		SMSMobileMasked    string `json:"sms_mobile_masked"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.SMSMFABound || !body.SMSMobileAvailable || body.SMSMobileMasked != "138****8000" {
+		t.Fatalf("unexpected admin user mfa body: %+v", body)
+	}
+}
+
+func TestAdminAliyunID2MetaVerifyReturnsResultWhenEnabled(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.AllowedUsernames = []string{"admin"}
+	cfg.Aliyun.Enabled = true
+	cfg.Aliyun.ID2MetaVerifyEnabled = true
+	aliyunClient := &fakeAliyun{id2Verify: aliyunkyc.InfoVerifyResponse{Passed: true, Code: "200", BizCode: "1", RequestID: "REQ-ID2"}}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    aliyunClient,
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	admin := adminSession(t, handler, srv, "admin")
+
+	for attempt := 0; attempt < 2; attempt++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/aliyun/id2-meta-verify", strings.NewReader(`{"name":"李四","id_number":"440524188001010014"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-CSRF-Token", admin.csrfToken)
+		for _, cookie := range admin.cookies {
+			req.AddCookie(cookie)
+		}
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("attempt %d admin id2 status = %d body=%s", attempt+1, rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Type   string `json:"type"`
+			Result struct {
+				Passed    bool   `json:"passed"`
+				BizCode   string `json:"biz_code"`
+				RequestID string `json:"request_id"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Type != "id2_meta_verify" || !body.Result.Passed || body.Result.BizCode != "1" || body.Result.RequestID != "REQ-ID2" {
+			t.Fatalf("unexpected admin id2 body: %+v", body)
+		}
+	}
+	if aliyunClient.id2Call != 2 {
+		t.Fatalf("admin id2 calls = %d, want 2", aliyunClient.id2Call)
+	}
+	if aliyunClient.id2Req.Name != "李四" || aliyunClient.id2Req.IDNumber != "440524188001010014" {
+		t.Fatalf("unexpected admin id2 request: %+v", aliyunClient.id2Req)
+	}
+}
+
+func TestAdminAliyunMobile3MetaDetailVerifyReturnsResultWhenEnabled(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.AllowedUsernames = []string{"admin"}
+	cfg.Aliyun.Enabled = true
+	cfg.Aliyun.Mobile3MetaDetailVerifyEnabled = true
+	aliyunClient := &fakeAliyun{mobile3Verify: aliyunkyc.InfoVerifyResponse{Passed: true, Code: "200", BizCode: "1", SubCode: "101", ISPName: "CMCC", RequestID: "REQ-MOBILE3"}}
+	ak := &fakeAuthentik{
+		user:            authentik.User{Attributes: map[string]interface{}{}},
+		smsDeviceByUser: map[string]bool{"5": true},
+		smsPhoneByUser:  map[string]string{"5": "+8613800138000"},
+	}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: ak,
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    aliyunClient,
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	admin := adminSession(t, handler, srv, "admin")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/aliyun/mobile3-meta-detail-verify", strings.NewReader(`{"user_id":"5","name":"李四","id_number":"440524188001010014"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", admin.csrfToken)
+	for _, cookie := range admin.cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin mobile3 status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Type   string `json:"type"`
+		Result struct {
+			Passed    bool   `json:"passed"`
+			BizCode   string `json:"biz_code"`
+			SubCode   string `json:"sub_code"`
+			ISPName   string `json:"isp_name"`
+			RequestID string `json:"request_id"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Type != "mobile3_meta_detail_verify" || !body.Result.Passed || body.Result.BizCode != "1" || body.Result.SubCode != "101" || body.Result.ISPName != "CMCC" || body.Result.RequestID != "REQ-MOBILE3" {
+		t.Fatalf("unexpected admin mobile3 body: %+v", body)
+	}
+	if aliyunClient.mobile3Call != 1 {
+		t.Fatalf("admin mobile3 calls = %d, want 1", aliyunClient.mobile3Call)
+	}
+	if aliyunClient.mobile3Req.Name != "李四" || aliyunClient.mobile3Req.IDNumber != "440524188001010014" || aliyunClient.mobile3Req.Mobile != "13800138000" {
+		t.Fatalf("unexpected admin mobile3 request: %+v", aliyunClient.mobile3Req)
+	}
+	if strings.Join(ak.smsLookupUserID, ",") != "5" {
+		t.Fatalf("sms lookup user ids = %+v, want 5", ak.smsLookupUserID)
+	}
+}
+
+func TestAdminAliyunMobile3MetaDetailVerifyRequiresSMSDevice(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.AllowedUsernames = []string{"admin"}
+	cfg.Aliyun.Enabled = true
+	cfg.Aliyun.Mobile3MetaDetailVerifyEnabled = true
+	aliyunClient := &fakeAliyun{}
+	srv := New(Dependencies{
+		Config: cfg,
+		Logger: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:   fakeOIDC{},
+		Authentik: &fakeAuthentik{
+			user:            authentik.User{Attributes: map[string]interface{}{}},
+			smsDeviceByUser: map[string]bool{"5": false},
+		},
+		Alipay:   fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:   aliyunClient,
+		Stats:    testStats(t),
+		PII:      &fakePIIStore{},
+		StaticFS: http.FS(fstest.MapFS{"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()}}),
+	})
+	handler := srv.Handler()
+	admin := adminSession(t, handler, srv, "admin")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/aliyun/mobile3-meta-detail-verify", strings.NewReader(`{"user_id":"5","name":"李四","id_number":"440524188001010014"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", admin.csrfToken)
+	for _, cookie := range admin.cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusPreconditionRequired {
+		t.Fatalf("admin mobile3 status = %d, want %d body=%s", rec.Code, http.StatusPreconditionRequired, rec.Body.String())
+	}
+	if aliyunClient.mobile3Call != 0 {
+		t.Fatalf("mobile3 calls = %d, want 0", aliyunClient.mobile3Call)
+	}
+}
+
+func TestAdminAliyunID2MetaVerifyRejectsInvalidIDBeforeAliyun(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.AllowedUsernames = []string{"admin"}
+	cfg.Aliyun.Enabled = true
+	cfg.Aliyun.ID2MetaVerifyEnabled = true
+	aliyunClient := &fakeAliyun{}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Aliyun:    aliyunClient,
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS:  http.FS(fstest.MapFS{"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()}}),
+	})
+	handler := srv.Handler()
+	admin := adminSession(t, handler, srv, "admin")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/aliyun/id2-meta-verify", strings.NewReader(`{"name":"李四","id_number":"44052418800101001X"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", admin.csrfToken)
+	for _, cookie := range admin.cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("admin id2 status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if aliyunClient.id2Call != 0 {
+		t.Fatalf("id2 calls = %d, want 0", aliyunClient.id2Call)
 	}
 }
 
