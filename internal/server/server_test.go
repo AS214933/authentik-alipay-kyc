@@ -36,13 +36,31 @@ func (fakeOIDC) Exchange(context.Context, string, string) (oidc.Claims, error) {
 }
 
 type fakeAuthentik struct {
-	user   authentik.User
-	userID string
-	attr   authentik.KYCAttribute
+	user            authentik.User
+	userID          string
+	attr            authentik.KYCAttribute
+	smsDeviceBound  *bool
+	smsDeviceByUser map[string]bool
+	smsDeviceErr    error
+	smsLookupUserID []string
 }
 
 func (f *fakeAuthentik) GetUser(context.Context, string) (authentik.User, error) {
 	return f.user, nil
+}
+
+func (f *fakeAuthentik) HasSMSDevice(_ context.Context, userID string) (bool, error) {
+	f.smsLookupUserID = append(f.smsLookupUserID, userID)
+	if f.smsDeviceErr != nil {
+		return false, f.smsDeviceErr
+	}
+	if f.smsDeviceByUser != nil {
+		return f.smsDeviceByUser[userID], nil
+	}
+	if f.smsDeviceBound != nil {
+		return *f.smsDeviceBound, nil
+	}
+	return true, nil
 }
 
 func (f *fakeAuthentik) MarkVerified(_ context.Context, userID string, attr authentik.KYCAttribute) error {
@@ -610,6 +628,45 @@ func TestMeReturnsQRNoticeHTML(t *testing.T) {
 	}
 }
 
+func TestMeReturnsSMSMFARequirement(t *testing.T) {
+	cfg := testConfig()
+	smsBound := false
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}, smsDeviceBound: &smsBound},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	for _, cookie := range userCookie(t, srv) {
+		req.AddCookie(cookie)
+	}
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("me status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		SMSMFABound    bool   `json:"sms_mfa_bound"`
+		MFASettingsURL string `json:"mfa_settings_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.SMSMFABound {
+		t.Fatal("sms_mfa_bound = true, want false")
+	}
+	if body.MFASettingsURL != cfg.Authentik.BaseURL+authentikMFASettingsPath {
+		t.Fatalf("mfa_settings_url = %q", body.MFASettingsURL)
+	}
+}
+
 func TestMeReturnsEnabledProviders(t *testing.T) {
 	cfg := testConfig()
 	cfg.Aliyun.Enabled = true
@@ -716,6 +773,43 @@ func TestStartKYCDefaultsToAlipayWhenBothProvidersEnabled(t *testing.T) {
 	}
 	if body.Provider != ProviderAlipay {
 		t.Fatalf("provider = %q, want alipay", body.Provider)
+	}
+}
+
+func TestStartKYCRequiresSMSMFADevice(t *testing.T) {
+	cfg := testConfig()
+	smsBound := false
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: &fakeAuthentik{user: authentik.User{Attributes: map[string]interface{}{}}, smsDeviceBound: &smsBound},
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/kyc/start", strings.NewReader(`{"name":"张三","id_number":"11010519491231002X"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range userCookie(t, srv) {
+		req.AddCookie(cookie)
+	}
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusPreconditionRequired {
+		t.Fatalf("start status = %d, want %d body=%s", rec.Code, http.StatusPreconditionRequired, rec.Body.String())
+	}
+	var body struct {
+		Error          string `json:"error"`
+		MFASettingsURL string `json:"mfa_settings_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error != "sms_mfa_required" || body.MFASettingsURL != cfg.Authentik.BaseURL+authentikMFASettingsPath {
+		t.Fatalf("unexpected sms mfa response: %+v", body)
 	}
 }
 
@@ -1346,6 +1440,54 @@ func TestAdminStatusReturnsAllowedWhenUsernameMatches(t *testing.T) {
 	}
 	if !body.Enabled || !body.Authenticated || !body.Allowed || !strings.Contains(body.LoginURL, "/auth/login") || body.CSRFToken == "" {
 		t.Fatalf("unexpected admin status body: %+v", body)
+	}
+}
+
+func TestAdminUserMFAReturnsSMSDeviceStatus(t *testing.T) {
+	cfg := testConfig()
+	cfg.Admin.Enabled = true
+	cfg.Admin.AllowedUsernames = []string{"admin"}
+	ak := &fakeAuthentik{
+		user:            authentik.User{Attributes: map[string]interface{}{}},
+		smsDeviceByUser: map[string]bool{"5": false},
+	}
+	srv := New(Dependencies{
+		Config:    cfg,
+		Logger:    slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+		OIDC:      fakeOIDC{},
+		Authentik: ak,
+		Alipay:    fakeAlipay{certifyID: "CERT123", passed: "T"},
+		Stats:     testStats(t),
+		PII:       &fakePIIStore{},
+		StaticFS: http.FS(fstest.MapFS{
+			"index.html": {Data: []byte("<html></html>"), ModTime: time.Now()},
+		}),
+	})
+	handler := srv.Handler()
+	cookies := adminCookie(t, srv, "admin")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/user-mfa?user_id=5", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin user mfa status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		UserID         string `json:"user_id"`
+		SMSMFABound    bool   `json:"sms_mfa_bound"`
+		MFASettingsURL string `json:"mfa_settings_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.UserID != "5" || body.SMSMFABound || body.MFASettingsURL != cfg.Authentik.BaseURL+authentikMFASettingsPath {
+		t.Fatalf("unexpected admin user mfa body: %+v", body)
+	}
+	if strings.Join(ak.smsLookupUserID, ",") != "5" {
+		t.Fatalf("sms lookup user ids = %+v, want 5", ak.smsLookupUserID)
 	}
 }
 

@@ -45,6 +45,14 @@
                 <label>
                   <span>用户 ID</span>
                   <input v-model.trim="adminImportForm.user_id" name="user_id" autocomplete="off" required />
+                  <span v-if="admin.smsMfaChecking" class="field-hint">正在检查手机号绑定状态...</span>
+                  <span
+                    v-else-if="admin.smsMfaMessage"
+                    class="field-hint"
+                    :class="{ warning: admin.smsMfaBound === false }"
+                  >
+                    {{ admin.smsMfaMessage }}
+                  </span>
                 </label>
                 <label>
                   <span>需要 KYC 认证</span>
@@ -156,7 +164,17 @@
               </div>
             </div>
 
-            <div v-if="state.verified && state.kyc" class="result-grid">
+            <div v-if="needsSMSMFA" class="empty">
+              <ShieldAlert :size="38" />
+              <h2>需要绑定手机号</h2>
+              <p>实名认证前需要先在 Authentik 的 MFA 设备中绑定 SMS Device。</p>
+              <button class="primary" type="button" @click="openMfaSettings">
+                <ExternalLink :size="18" />
+                前往绑定手机号
+              </button>
+            </div>
+
+            <div v-else-if="state.verified && state.kyc" class="result-grid">
               <div>
                 <span class="label">姓名</span>
                 <strong>{{ state.kyc.name_masked }}</strong>
@@ -253,7 +271,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import {
   AlertTriangle,
   CircleCheck,
@@ -280,6 +298,8 @@ const state = reactive({
   kyc: null,
   adminEnabled: false,
   adminAllowed: false,
+  smsMfaBound: null,
+  mfaSettingsUrl: '',
   providers: ['alipay'],
   provider: 'alipay',
   pendingProvider: '',
@@ -314,6 +334,9 @@ const admin = reactive({
   loginUrl: '/auth/login?return_to=%2Fadmin',
   result: null,
   invite: null,
+  smsMfaChecking: false,
+  smsMfaBound: null,
+  smsMfaMessage: '',
   error: '',
   success: ''
 })
@@ -337,6 +360,7 @@ const callbackMessage = computed(() => {
 const canSwitchProvider = computed(() => state.providers.includes('alipay') && state.providers.includes('aliyun'))
 const canUseKycPage = computed(() => state.authenticated || state.invite.active || state.verified || Boolean(callbackState.value))
 const canResetPending = computed(() => !state.invite.active && state.authenticated)
+const needsSMSMFA = computed(() => !state.verified && state.smsMfaBound === false)
 const providerSwitchPrefix = computed(() =>
   state.provider === 'aliyun' ? '想使用支付宝？' : '支付宝无法使用？'
 )
@@ -367,6 +391,28 @@ onMounted(async () => {
     await confirmKyc(callbackState.value)
   }
 })
+
+let adminMfaCheckTimer = 0
+let adminMfaCheckSequence = 0
+
+watch(
+  () => adminImportForm.user_id,
+  (userID) => {
+    admin.smsMfaMessage = ''
+    admin.smsMfaBound = null
+    if (adminMfaCheckTimer) {
+      window.clearTimeout(adminMfaCheckTimer)
+    }
+    const sequence = ++adminMfaCheckSequence
+    userID = String(userID || '').trim()
+    if (!isAdminPage || !admin.allowed || !userID) {
+      admin.smsMfaChecking = false
+      return
+    }
+    admin.smsMfaChecking = true
+    adminMfaCheckTimer = window.setTimeout(() => checkAdminUserMFA(userID, sequence), 450)
+  }
+)
 
 async function request(path, options = {}) {
   const response = await fetch(path, {
@@ -399,6 +445,8 @@ async function loadMe() {
     state.kyc = data.kyc || null
     state.adminEnabled = Boolean(data.admin_enabled)
     state.adminAllowed = Boolean(data.admin_allowed)
+    state.smsMfaBound = data.sms_mfa_bound !== false
+    state.mfaSettingsUrl = data.mfa_settings_url || ''
     state.qrNoticeHtml = data.qr_notice_html || ''
     if (!state.invite.active && data.kyc_invite?.token) {
       inviteToken.value = data.kyc_invite.token
@@ -464,6 +512,23 @@ async function loadAdminStatus() {
     admin.error = err.message
   } finally {
     admin.loading = false
+  }
+}
+
+async function checkAdminUserMFA(userID, sequence) {
+  try {
+    const data = await request(`/api/admin/user-mfa?user_id=${encodeURIComponent(userID)}`)
+    if (sequence !== adminMfaCheckSequence) return
+    admin.smsMfaBound = Boolean(data.sms_mfa_bound)
+    admin.smsMfaMessage = admin.smsMfaBound ? '该用户已绑定手机号' : '该用户未绑定手机号'
+  } catch (err) {
+    if (sequence !== adminMfaCheckSequence) return
+    admin.smsMfaBound = null
+    admin.smsMfaMessage = err.message
+  } finally {
+    if (sequence === adminMfaCheckSequence) {
+      admin.smsMfaChecking = false
+    }
   }
 }
 
@@ -568,6 +633,11 @@ async function startKyc() {
     }
     openLaunchUrlOnMobile()
   } catch (err) {
+    if (err.status === 428 && err.body?.error === 'sms_mfa_required') {
+      state.smsMfaBound = false
+      state.mfaSettingsUrl = err.body.mfa_settings_url || state.mfaSettingsUrl
+      return
+    }
     state.error = state.provider === 'aliyun' && err.message === 'aliyun_meta_failed'
       ? '无法获取阿里云认证环境信息，请换用其他浏览器或稍后再试'
       : err.message
@@ -625,6 +695,12 @@ function resetKyc() {
 function openLaunchUrl() {
   if (launchButtonUrl.value) {
     window.location.href = launchButtonUrl.value
+  }
+}
+
+function openMfaSettings() {
+  if (state.mfaSettingsUrl) {
+    window.location.href = state.mfaSettingsUrl
   }
 }
 

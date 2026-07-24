@@ -303,6 +303,17 @@ label {
   font-weight: 700;
 }
 
+.field-hint {
+  color: #637083;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.field-hint.warning {
+  color: #b42318;
+}
+
 input,
 select {
   width: 100%;

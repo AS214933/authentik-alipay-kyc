@@ -35,6 +35,8 @@ const (
 	AdminKYCInviteTTL = 24 * time.Hour
 )
 
+const authentikMFASettingsPath = `/if/user/#/settings;%7B"page"%3A"page-mfa"%2C"ak-user-settings-mfa-page"%3A0%7D`
+
 type OIDCClient interface {
 	AuthCodeURL(state, nonce string) string
 	Exchange(ctx context.Context, code, nonce string) (oidc.Claims, error)
@@ -42,6 +44,7 @@ type OIDCClient interface {
 
 type AuthentikClient interface {
 	GetUser(ctx context.Context, userID string) (authentik.User, error)
+	HasSMSDevice(ctx context.Context, userID string) (bool, error)
 	MarkVerified(ctx context.Context, userID string, attr authentik.KYCAttribute) error
 }
 
@@ -220,6 +223,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/me", s.me)
 	mux.HandleFunc("GET /api/stats", s.statsSnapshot)
 	mux.HandleFunc("GET /api/admin/status", s.adminStatus)
+	mux.HandleFunc("GET /api/admin/user-mfa", s.adminUserMFA)
 	mux.HandleFunc("POST /api/admin/import", s.adminImport)
 	mux.HandleFunc("GET /api/kyc/invite", s.kycInvite)
 	mux.HandleFunc("POST /api/kyc/start", s.startKYC)
@@ -341,6 +345,14 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "failed to load authentik user")
 		return
 	}
+	smsMFA, err := s.authentik.HasSMSDevice(r.Context(), userID)
+	if err != nil {
+		s.logger.Warn("failed to load authentik mfa devices", "user_id", userID, "error", err)
+		writeError(w, http.StatusBadGateway, "failed to load authentik mfa devices")
+		return
+	}
+	response["sms_mfa_bound"] = smsMFA
+	response["mfa_settings_url"] = s.authentikMFASettingsURL()
 	if attr, ok := akUser.Attributes[s.cfg.Authentik.AttributeKey]; ok {
 		response["kyc"] = attr
 		response["verified"] = kycAttributeVerified(attr)
@@ -398,6 +410,33 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 		response["csrf_token"] = token
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) adminUserMFA(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.Admin.Enabled {
+		writeError(w, http.StatusNotFound, "admin import is disabled")
+		return
+	}
+	if !s.adminAuthorized(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	userID := strings.TrimSpace(r.URL.Query().Get("user_id"))
+	if userID == "" {
+		writeError(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+	bound, err := s.authentik.HasSMSDevice(r.Context(), userID)
+	if err != nil {
+		s.logger.Warn("failed to load authentik mfa devices", "user_id", userID, "error", err)
+		writeError(w, http.StatusBadGateway, "failed to load authentik mfa devices")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"user_id":          userID,
+		"sms_mfa_bound":    bound,
+		"mfa_settings_url": s.authentikMFASettingsURL(),
+	})
 }
 
 func (s *Server) adminImport(w http.ResponseWriter, r *http.Request) {
@@ -550,6 +589,16 @@ func (s *Server) startKYC(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(idNumber) != 15 && len(idNumber) != 18 {
 		writeError(w, http.StatusBadRequest, "id_number must be a 15 or 18 character identity card number")
+		return
+	}
+	smsMFA, err := s.authentik.HasSMSDevice(r.Context(), userID)
+	if err != nil {
+		s.logger.Warn("failed to load authentik mfa devices", "user_id", userID, "error", err)
+		writeError(w, http.StatusBadGateway, "failed to load authentik mfa devices")
+		return
+	}
+	if !smsMFA {
+		writeSMSMFARequired(w, s.authentikMFASettingsURL())
 		return
 	}
 	s.recordTotal()
@@ -975,6 +1024,10 @@ func (s *Server) providerEnabled(provider string) bool {
 	return false
 }
 
+func (s *Server) authentikMFASettingsURL() string {
+	return strings.TrimRight(s.cfg.Authentik.BaseURL, "/") + authentikMFASettingsPath
+}
+
 func (s *Server) adminAuthorized(r *http.Request) bool {
 	if !s.cfg.Admin.Enabled {
 		return false
@@ -1380,6 +1433,13 @@ func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, errorResponse{Error: message})
+}
+
+func writeSMSMFARequired(w http.ResponseWriter, settingsURL string) {
+	writeJSON(w, http.StatusPreconditionRequired, map[string]string{
+		"error":            "sms_mfa_required",
+		"mfa_settings_url": settingsURL,
+	})
 }
 
 func writePlain(w http.ResponseWriter, status int, message string) {

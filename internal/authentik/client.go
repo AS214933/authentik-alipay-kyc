@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -37,6 +38,13 @@ type KYCAttribute struct {
 	IDHash     string `json:"id_hash"`
 	IDLast4    string `json:"id_last4"`
 	NameMasked string `json:"name_masked"`
+}
+
+type authenticatorDevice struct {
+	Type          string `json:"type"`
+	MetaModelName string `json:"meta_model_name"`
+	VerboseName   string `json:"verbose_name"`
+	Confirmed     bool   `json:"confirmed"`
 }
 
 func NewClient(cfg config.AuthentikConfig) *Client {
@@ -71,6 +79,40 @@ func (c *Client) GetUser(ctx context.Context, userID string) (User, error) {
 		return User{}, err
 	}
 	return user, nil
+}
+
+func (c *Client) HasSMSDevice(ctx context.Context, userID string) (bool, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false, fmt.Errorf("authentik sms device lookup requires user id")
+	}
+	reqURL := c.baseURL + "/api/v3/authenticators/admin/all/?user=" + url.QueryEscape(userID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return false, err
+	}
+	c.auth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, fmt.Errorf("authentik sms device lookup failed: status=%d body=%s", resp.StatusCode, safeBodySummary(body))
+	}
+
+	devices, err := parseAuthenticatorDevices(body)
+	if err != nil {
+		return false, err
+	}
+	for _, device := range devices {
+		if device.Confirmed && device.isSMS() {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (c *Client) MarkVerified(ctx context.Context, userID string, attr KYCAttribute) error {
@@ -113,6 +155,30 @@ func (c *Client) MarkVerified(ctx context.Context, userID string, attr KYCAttrib
 		return fmt.Errorf("authentik update user failed: status=%d body=%s", resp.StatusCode, safeBodySummary(body))
 	}
 	return nil
+}
+
+func parseAuthenticatorDevices(body []byte) ([]authenticatorDevice, error) {
+	var page struct {
+		Results []authenticatorDevice `json:"results"`
+	}
+	if err := json.Unmarshal(body, &page); err == nil && page.Results != nil {
+		return page.Results, nil
+	}
+	var devices []authenticatorDevice
+	if err := json.Unmarshal(body, &devices); err != nil {
+		return nil, err
+	}
+	return devices, nil
+}
+
+func (d authenticatorDevice) isSMS() bool {
+	for _, value := range []string{d.Type, d.MetaModelName, d.VerboseName} {
+		value = strings.ToLower(strings.ReplaceAll(value, " ", ""))
+		if strings.Contains(value, "sms") {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) auth(req *http.Request) {
